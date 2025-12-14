@@ -1,5 +1,26 @@
 import { Readable } from 'stream';
-import { getDrive, getAccessToken } from '../lib/drive.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { google } from 'googleapis';
+import { getDrive } from '../lib/drive.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let saAuthClient = null;
+
+async function getServiceAccountAccessToken() {
+  if (!saAuthClient) {
+    const keyFile = path.join(__dirname, '..', 'config', 'nanimeid-2f819a5dcf5f.json');
+    const auth = new google.auth.GoogleAuth({
+      keyFile,
+      scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+    });
+    saAuthClient = await auth.getClient();
+  }
+  const token = await saAuthClient.getAccessToken();
+  return typeof token === 'string' ? token : token?.token;
+}
 
 export async function listDriveController(request, reply) {
   try {
@@ -431,7 +452,7 @@ export async function streamDriveController(request, reply) {
 
   try {
     const range = request.headers['range'] || request.headers['Range'];
-    const accessToken = await getAccessToken();
+    const accessToken = await getServiceAccountAccessToken();
     if (!accessToken) throw new Error('No access token available');
 
     const mediaUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media${
