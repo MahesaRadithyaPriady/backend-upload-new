@@ -110,7 +110,7 @@ async function uploadMultipartFromDriveStream({
 
   // Baca file temp per chunk dan upload part secara paralel
   const fd = fs.openSync(tempFilePath, 'r');
-  const sha1s = [];
+  const sha1Map = new Map(); // partNumber -> sha1
   let partNumber = 1;
   const concurrencyLimit = MAX_CONCURRENT_PARTS;
   const activeUploads = [];
@@ -136,7 +136,7 @@ async function uploadMultipartFromDriveStream({
 
   let offset = 0;
   while (true) {
-    const buffer = Buffer.alloc(PART_SIZE);
+    const buffer = Buffer.allocUnsafe(PART_SIZE);
     const { bytesRead } = fs.readSync(fd, buffer, 0, PART_SIZE, offset);
     if (bytesRead === 0) break;
     const partBuffer = bytesRead < PART_SIZE ? buffer.subarray(0, bytesRead) : buffer;
@@ -148,7 +148,7 @@ async function uploadMultipartFromDriveStream({
       for (let i = 0; i < activeUploads.length; i++) {
         if (activeUploads[i].status === 'fulfilled') {
           const { partNum, sha1 } = activeUploads[i].value;
-          sha1s[partNum - 1] = sha1;
+          sha1Map.set(partNum, sha1);
           activeUploads.splice(i, 1);
           break;
         }
@@ -168,11 +168,19 @@ async function uploadMultipartFromDriveStream({
   for (const r of results) {
     if (r.status === 'fulfilled') {
       const { partNum, sha1 } = r.value;
-      sha1s[partNum - 1] = sha1;
+      sha1Map.set(partNum, sha1);
     } else {
       console.error(`[MIGRATE] Part upload failed:`, r.reason);
       throw r.reason;
     }
+  }
+
+  // Build ordered partSha1Array dari Map
+  const partSha1Array = [];
+  for (let i = 1; i <= partNumber - 1; i++) {
+    const sha1 = sha1Map.get(i);
+    if (!sha1) throw new Error(`Missing SHA1 for part ${i}`);
+    partSha1Array.push(sha1);
   }
 
   fs.closeSync(fd);
@@ -180,7 +188,7 @@ async function uploadMultipartFromDriveStream({
 
   await b2.finishLargeFile({
     fileId,
-    partSha1Array: sha1s,
+    partSha1Array,
   });
 
   const totalMb = (totalBytes || 0) / (1024 * 1024);
