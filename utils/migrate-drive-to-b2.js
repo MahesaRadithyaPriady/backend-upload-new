@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
 import B2 from 'backblaze-b2';
+import crypto from 'crypto';
 import { upsertFileMapping, getFileMapping } from '../lib/fileMappingDb.js';
 
 // --- Konfigurasi dasar ---
@@ -64,17 +65,35 @@ async function createB2Client() {
   return { b2, bucketId };
 }
 
-// --- Upload satu file ke B2 ---
-async function uploadFileToB2(b2, bucketId, fileName, dataStream, contentType, totalBytes) {
-  // backblaze-b2 expects data sebagai Buffer/string, bukan stream Node langsung
-  const chunks = [];
+// --- Upload satu file besar ke B2 dengan multipart (streaming) ---
+const PART_SIZE = 50 * 1024 * 1024; // 50MB
+
+async function uploadMultipartFromDriveStream({
+  b2,
+  bucketId,
+  fileNameInB2,
+  driveStream,
+  contentType,
+  totalBytes,
+}) {
+  const startLarge = await b2.startLargeFile({
+    bucketId,
+    fileName: fileNameInB2,
+    contentType: contentType || 'application/octet-stream',
+  });
+  const fileId = startLarge.data.fileId;
+
+  const sha1s = [];
+  let partNumber = 1;
   let downloaded = 0;
   let lastLoggedPercent = 0;
   const start = Date.now();
 
-  for await (const chunk of dataStream) {
+  let buffer = Buffer.alloc(0);
+
+  for await (const chunk of driveStream) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    chunks.push(buf);
+    buffer = Buffer.concat([buffer, buf]);
     downloaded += buf.length;
 
     if (totalBytes) {
@@ -84,44 +103,107 @@ async function uploadFileToB2(b2, bucketId, fileName, dataStream, contentType, t
         const mb = downloaded / (1024 * 1024);
         const speed = mb / elapsedSec;
         console.log(
-          `[MIGRATE] Download progress ${percent}% (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s) for ${fileName}`,
+          `[MIGRATE] Download progress ${percent}% (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s) for ${fileNameInB2}`,
         );
         lastLoggedPercent = percent;
       }
     }
+
+    while (buffer.length >= PART_SIZE) {
+      const part = buffer.subarray(0, PART_SIZE);
+      buffer = buffer.subarray(PART_SIZE);
+
+      const sha1 = crypto.createHash('sha1').update(part).digest('hex');
+      sha1s.push(sha1);
+
+      const { data: up } = await b2.getUploadPartUrl({ fileId });
+      const upStart = Date.now();
+      await b2.uploadPart({
+        uploadUrl: up.uploadUrl,
+        uploadAuthToken: up.authorizationToken,
+        partNumber,
+        data: part,
+        hash: sha1,
+      });
+      const upElapsed = (Date.now() - upStart) / 1000 || 1;
+      const mb = part.length / (1024 * 1024);
+      const speed = mb / upElapsed;
+      console.log(
+        `[MIGRATE] Uploaded part ${partNumber} for ${fileNameInB2} (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s)`,
+      );
+
+      partNumber += 1;
+    }
   }
 
-  const buffer = Buffer.concat(chunks);
+  if (buffer.length > 0) {
+    const sha1 = crypto.createHash('sha1').update(buffer).digest('hex');
+    sha1s.push(sha1);
 
-  const { data } = await b2.getUploadUrl({ bucketId });
-  const uploadUrl = data.uploadUrl;
-  const uploadAuthToken = data.authorizationToken;
+    const { data: up } = await b2.getUploadPartUrl({ fileId });
+    const upStart = Date.now();
+    await b2.uploadPart({
+      uploadUrl: up.uploadUrl,
+      uploadAuthToken: up.authorizationToken,
+      partNumber,
+      data: buffer,
+      hash: sha1,
+    });
+    const upElapsed = (Date.now() - upStart) / 1000 || 1;
+    const mb = buffer.length / (1024 * 1024);
+    const speed = mb / upElapsed;
+    console.log(
+      `[MIGRATE] Uploaded final part ${partNumber} for ${fileNameInB2} (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s)`,
+    );
+  }
 
-  const upStart = Date.now();
-  const res = await b2.uploadFile({
-    uploadUrl,
-    uploadAuthToken,
-    fileName,
-    data: buffer,
-    mime: contentType || 'application/octet-stream',
+  const finishStart = Date.now();
+  await b2.finishLargeFile({
+    fileId,
+    partSha1Array: sha1s,
   });
-  const upElapsed = (Date.now() - upStart) / 1000 || 1;
-  const upMb = buffer.length / (1024 * 1024);
-  const upSpeed = upMb / upElapsed;
-  console.log(`[MIGRATE] Upload finished for ${fileName} (${upMb.toFixed(2)} MB, ${upSpeed.toFixed(2)} MB/s)`);
-
-  return res.data;
+  const finishElapsed = (Date.now() - finishStart) / 1000 || 1;
+  const totalMb = (totalBytes || 0) / (1024 * 1024);
+  console.log(
+    `[MIGRATE] Finished large file ${fileNameInB2} (${totalMb ? totalMb.toFixed(2) : 'unknown'} MB) in ${finishElapsed.toFixed(2)}s`,
+  );
 }
 
-async function uploadFileWithRetry({ b2, bucketId, fileNameInB2, stream, contentType, totalBytes, maxRetries = 3 }) {
+async function uploadDriveFileToB2WithRetry({
+  drive,
+  b2,
+  bucketId,
+  fileMeta,
+  fileNameInB2,
+  maxRetries = 2,
+}) {
   let attempt = 0;
-  // Karena stream hanya bisa dibaca sekali, kita biarkan uploadFileToB2 yang membuffer stream jadi Buffer,
-  // sehingga retry tidak butuh stream ulang dari Drive.
+  const totalBytes = fileMeta.size ? Number(fileMeta.size) || undefined : undefined;
+  const contentType = fileMeta.mimeType || 'application/octet-stream';
+
   while (true) {
     attempt += 1;
     try {
       console.log(`[MIGRATE] Upload attempt ${attempt} for ${fileNameInB2}`);
-      return await uploadFileToB2(b2, bucketId, fileNameInB2, stream, contentType, totalBytes);
+      const driveRes = await drive.files.get(
+        {
+          fileId: fileMeta.id,
+          alt: 'media',
+          supportsAllDrives: true,
+        },
+        { responseType: 'stream' },
+      );
+
+      const stream = driveRes.data;
+      await uploadMultipartFromDriveStream({
+        b2,
+        bucketId,
+        fileNameInB2,
+        driveStream: stream,
+        contentType,
+        totalBytes,
+      });
+      return;
     } catch (e) {
       console.error(`[MIGRATE] Upload error attempt ${attempt} for ${fileNameInB2}:`, e?.message || e);
       if (attempt >= maxRetries) throw e;
@@ -175,27 +257,13 @@ async function migrateFolder({ drive, b2, bucketId, driveFolderId, currentPath, 
         const fileNameInB2 = `${fullPrefix}${newPath}`;
         console.log(`[MIGRATE] Upload file: ${newPath} -> ${fileNameInB2}`);
 
-        const driveRes = await drive.files.get(
-          {
-            fileId: f.id,
-            alt: 'media',
-            supportsAllDrives: true,
-          },
-          { responseType: 'stream' },
-        );
-
-        const contentType = driveRes.headers['content-type'] || 'application/octet-stream';
-        const stream = driveRes.data;
-        const totalBytes = f.size ? Number(f.size) || undefined : undefined;
-
         try {
-          await uploadFileWithRetry({
+          await uploadDriveFileToB2WithRetry({
+            drive,
             b2,
             bucketId,
+            fileMeta: f,
             fileNameInB2,
-            stream,
-            contentType,
-            totalBytes,
           });
           // Simpan mapping driveFileId -> b2ObjectKey di SQLite
           upsertFileMapping(f.id, fileNameInB2, 'migrated');
