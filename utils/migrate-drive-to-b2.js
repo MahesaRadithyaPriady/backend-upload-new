@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
 import B2 from 'backblaze-b2';
-import { upsertFileMapping } from '../lib/fileMappingDb.js';
+import { upsertFileMapping, getFileMapping } from '../lib/fileMappingDb.js';
 
 // --- Konfigurasi dasar ---
 const SERVICE_ACCOUNT_KEY_FILE = new URL('../config/nanimeid-2f819a5dcf5f.json', import.meta.url).pathname;
@@ -65,27 +65,69 @@ async function createB2Client() {
 }
 
 // --- Upload satu file ke B2 ---
-async function uploadFileToB2(b2, bucketId, fileName, dataStream, contentType = 'application/octet-stream') {
+async function uploadFileToB2(b2, bucketId, fileName, dataStream, contentType, totalBytes) {
   // backblaze-b2 expects data sebagai Buffer/string, bukan stream Node langsung
   const chunks = [];
+  let downloaded = 0;
+  let lastLoggedPercent = 0;
+  const start = Date.now();
+
   for await (const chunk of dataStream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(buf);
+    downloaded += buf.length;
+
+    if (totalBytes) {
+      const percent = Math.max(1, Math.min(99, Math.round((downloaded / totalBytes) * 100)));
+      if (percent !== lastLoggedPercent) {
+        const elapsedSec = (Date.now() - start) / 1000 || 1;
+        const mb = downloaded / (1024 * 1024);
+        const speed = mb / elapsedSec;
+        console.log(
+          `[MIGRATE] Download progress ${percent}% (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s) for ${fileName}`,
+        );
+        lastLoggedPercent = percent;
+      }
+    }
   }
+
   const buffer = Buffer.concat(chunks);
 
   const { data } = await b2.getUploadUrl({ bucketId });
   const uploadUrl = data.uploadUrl;
   const uploadAuthToken = data.authorizationToken;
 
+  const upStart = Date.now();
   const res = await b2.uploadFile({
     uploadUrl,
     uploadAuthToken,
     fileName,
     data: buffer,
-    mime: contentType,
+    mime: contentType || 'application/octet-stream',
   });
+  const upElapsed = (Date.now() - upStart) / 1000 || 1;
+  const upMb = buffer.length / (1024 * 1024);
+  const upSpeed = upMb / upElapsed;
+  console.log(`[MIGRATE] Upload finished for ${fileName} (${upMb.toFixed(2)} MB, ${upSpeed.toFixed(2)} MB/s)`);
 
   return res.data;
+}
+
+async function uploadFileWithRetry({ b2, bucketId, fileNameInB2, stream, contentType, totalBytes, maxRetries = 3 }) {
+  let attempt = 0;
+  // Karena stream hanya bisa dibaca sekali, kita biarkan uploadFileToB2 yang membuffer stream jadi Buffer,
+  // sehingga retry tidak butuh stream ulang dari Drive.
+  while (true) {
+    attempt += 1;
+    try {
+      console.log(`[MIGRATE] Upload attempt ${attempt} for ${fileNameInB2}`);
+      return await uploadFileToB2(b2, bucketId, fileNameInB2, stream, contentType, totalBytes);
+    } catch (e) {
+      console.error(`[MIGRATE] Upload error attempt ${attempt} for ${fileNameInB2}:`, e?.message || e);
+      if (attempt >= maxRetries) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
 }
 
 // --- Rekursif list & upload dari Google Drive ---
@@ -98,7 +140,7 @@ async function migrateFolder({ drive, b2, bucketId, driveFolderId, currentPath, 
       q: `'${driveFolderId}' in parents and trashed = false`,
       pageSize: 1000,
       pageToken,
-      fields: 'nextPageToken, files(id, name, mimeType)',
+      fields: 'nextPageToken, files(id, name, mimeType, size)',
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
       corpora: 'allDrives',
@@ -123,6 +165,13 @@ async function migrateFolder({ drive, b2, bucketId, driveFolderId, currentPath, 
           prefix,
         });
       } else {
+        // Cek apakah file ini sudah pernah dimigrasi
+        const existing = getFileMapping(f.id);
+        if (existing && existing.status === 'migrated' && existing.b2ObjectKey) {
+          console.log(`[MIGRATE] Skip already-migrated file: ${newPath} -> ${existing.b2ObjectKey}`);
+          continue;
+        }
+
         const fileNameInB2 = `${fullPrefix}${newPath}`;
         console.log(`[MIGRATE] Upload file: ${newPath} -> ${fileNameInB2}`);
 
@@ -137,9 +186,17 @@ async function migrateFolder({ drive, b2, bucketId, driveFolderId, currentPath, 
 
         const contentType = driveRes.headers['content-type'] || 'application/octet-stream';
         const stream = driveRes.data;
+        const totalBytes = f.size ? Number(f.size) || undefined : undefined;
 
         try {
-          await uploadFileToB2(b2, bucketId, fileNameInB2, stream, contentType);
+          await uploadFileWithRetry({
+            b2,
+            bucketId,
+            fileNameInB2,
+            stream,
+            contentType,
+            totalBytes,
+          });
           // Simpan mapping driveFileId -> b2ObjectKey di SQLite
           upsertFileMapping(f.id, fileNameInB2, 'migrated');
         } catch (e) {
