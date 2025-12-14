@@ -2,6 +2,9 @@ import 'dotenv/config';
 import { google } from 'googleapis';
 import B2 from 'backblaze-b2';
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { upsertFileMapping, getFileMapping } from '../lib/fileMappingDb.js';
 
 // --- Konfigurasi dasar ---
@@ -65,8 +68,9 @@ async function createB2Client() {
   return { b2, bucketId };
 }
 
-// --- Upload satu file besar ke B2 dengan multipart (streaming) ---
+// --- Upload satu file besar ke B2 dengan multipart (streaming + temp file + parallel parts) ---
 const PART_SIZE = 50 * 1024 * 1024; // 50MB
+const MAX_CONCURRENT_PARTS = 3; // parallel upload parts
 
 async function uploadMultipartFromDriveStream({
   b2,
@@ -83,89 +87,105 @@ async function uploadMultipartFromDriveStream({
   });
   const fileId = startLarge.data.fileId;
 
-  const sha1s = [];
-  let partNumber = 1;
-  let downloaded = 0;
-  let lastLoggedPercent = 0;
-  const start = Date.now();
-
-  let buffer = Buffer.alloc(0);
-
-  for await (const chunk of driveStream) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    buffer = Buffer.concat([buffer, buf]);
-    downloaded += buf.length;
-
-    if (totalBytes) {
-      const percent = Math.max(1, Math.min(99, Math.round((downloaded / totalBytes) * 100)));
-      if (percent !== lastLoggedPercent) {
-        const elapsedSec = (Date.now() - start) / 1000 || 1;
-        const mb = downloaded / (1024 * 1024);
-        const speed = mb / elapsedSec;
-        console.log(
-          `[MIGRATE] Download progress ${percent}% (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s) for ${fileNameInB2}`,
-        );
-        lastLoggedPercent = percent;
-      }
-    }
-
-    while (buffer.length >= PART_SIZE) {
-      const part = buffer.subarray(0, PART_SIZE);
-      buffer = buffer.subarray(PART_SIZE);
-
-      const sha1 = crypto.createHash('sha1').update(part).digest('hex');
-      sha1s.push(sha1);
-
-      const { data: up } = await b2.getUploadPartUrl({ fileId });
-      const upStart = Date.now();
-      await b2.uploadPart({
-        uploadUrl: up.uploadUrl,
-        uploadAuthToken: up.authorizationToken,
-        partNumber,
-        data: part,
-        hash: sha1,
-      });
-      const upElapsed = (Date.now() - upStart) / 1000 || 1;
-      const mb = part.length / (1024 * 1024);
-      const speed = mb / upElapsed;
-      console.log(
-        `[MIGRATE] Uploaded part ${partNumber} for ${fileNameInB2} (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s)`,
-      );
-
-      partNumber += 1;
-    }
+  // Pre-fetch upload part URLs (pool)
+  const partUrlPool = [];
+  for (let i = 0; i < MAX_CONCURRENT_PARTS; i++) {
+    const { data: up } = await b2.getUploadPartUrl({ fileId });
+    partUrlPool.push(up);
   }
 
-  if (buffer.length > 0) {
-    const sha1 = crypto.createHash('sha1').update(buffer).digest('hex');
-    sha1s.push(sha1);
+  // Stream dari Drive ke file temp di disk (untuk menghindari Buffer.concat mahal)
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migrate-'));
+  const tempFilePath = path.join(tmpDir, path.basename(fileNameInB2));
+  const writeStream = fs.createWriteStream(tempFilePath);
+  for await (const chunk of driveStream) {
+    writeStream.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  writeStream.end();
 
-    const { data: up } = await b2.getUploadPartUrl({ fileId });
+  await new Promise((resolve, reject) => {
+    writeStream.on('finish', resolve);
+    writeStream.on('error', reject);
+  });
+
+  // Baca file temp per chunk dan upload part secara paralel
+  const fd = fs.openSync(tempFilePath, 'r');
+  const sha1s = [];
+  let partNumber = 1;
+  const concurrencyLimit = MAX_CONCURRENT_PARTS;
+  const activeUploads = [];
+
+  const uploadPart = async (partBuffer, partNum, uploadUrlInfo) => {
+    const sha1 = crypto.createHash('sha1').update(partBuffer).digest('hex');
     const upStart = Date.now();
     await b2.uploadPart({
-      uploadUrl: up.uploadUrl,
-      uploadAuthToken: up.authorizationToken,
-      partNumber,
-      data: buffer,
+      uploadUrl: uploadUrlInfo.uploadUrl,
+      uploadAuthToken: uploadUrlInfo.authorizationToken,
+      partNumber: partNum,
+      data: partBuffer,
       hash: sha1,
     });
     const upElapsed = (Date.now() - upStart) / 1000 || 1;
-    const mb = buffer.length / (1024 * 1024);
+    const mb = partBuffer.length / (1024 * 1024);
     const speed = mb / upElapsed;
     console.log(
-      `[MIGRATE] Uploaded final part ${partNumber} for ${fileNameInB2} (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s)`,
+      `[MIGRATE] Uploaded part ${partNum} for ${fileNameInB2} (${mb.toFixed(2)} MB, ${speed.toFixed(2)} MB/s)`,
     );
+    return { partNum, sha1 };
+  };
+
+  let offset = 0;
+  while (true) {
+    const buffer = Buffer.alloc(PART_SIZE);
+    const { bytesRead } = fs.readSync(fd, buffer, 0, PART_SIZE, offset);
+    if (bytesRead === 0) break;
+    const partBuffer = bytesRead < PART_SIZE ? buffer.subarray(0, bytesRead) : buffer;
+
+    // Tunggu slot kosong di pool
+    if (activeUploads.length >= concurrencyLimit) {
+      await Promise.race(activeUploads);
+      // Hapus yang sudah selesai
+      for (let i = 0; i < activeUploads.length; i++) {
+        if (activeUploads[i].status === 'fulfilled') {
+          const { partNum, sha1 } = activeUploads[i].value;
+          sha1s[partNum - 1] = sha1;
+          activeUploads.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    // Ambil URL dari pool (round-robin sederhana)
+    const urlInfo = partUrlPool[(partNumber - 1) % partUrlPool.length];
+    const uploadPromise = uploadPart(partBuffer, partNumber, urlInfo);
+    activeUploads.push(uploadPromise);
+    partNumber++;
+    offset += bytesRead;
   }
 
-  const finishStart = Date.now();
+  // Tunggu semua part selesai
+  const results = await Promise.allSettled(activeUploads);
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      const { partNum, sha1 } = r.value;
+      sha1s[partNum - 1] = sha1;
+    } else {
+      console.error(`[MIGRATE] Part upload failed:`, r.reason);
+      throw r.reason;
+    }
+  }
+
+  fs.closeSync(fd);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+
   await b2.finishLargeFile({
     fileId,
     partSha1Array: sha1s,
   });
-  const finishElapsed = (Date.now() - finishStart) / 1000 || 1;
+
   const totalMb = (totalBytes || 0) / (1024 * 1024);
   console.log(
-    `[MIGRATE] Finished large file ${fileNameInB2} (${totalMb ? totalMb.toFixed(2) : 'unknown'} MB) in ${finishElapsed.toFixed(2)}s`,
+    `[MIGRATE] Finished large file ${fileNameInB2} (${totalMb ? totalMb.toFixed(2) : 'unknown'} MB)`,
   );
 }
 
