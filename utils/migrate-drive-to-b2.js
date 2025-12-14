@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
 import B2 from 'backblaze-b2';
+import { upsertFileMapping } from '../lib/fileMappingDb.js';
 
 // --- Konfigurasi dasar ---
 const SERVICE_ACCOUNT_KEY_FILE = new URL('../config/nanimeid-2f819a5dcf5f.json', import.meta.url).pathname;
@@ -139,8 +140,14 @@ async function migrateFolder({ drive, b2, bucketId, driveFolderId, currentPath, 
 
         try {
           await uploadFileToB2(b2, bucketId, fileNameInB2, stream, contentType);
+          // Simpan mapping driveFileId -> b2ObjectKey di SQLite
+          upsertFileMapping(f.id, fileNameInB2, 'migrated');
         } catch (e) {
           console.error(`[MIGRATE] Failed upload for ${newPath}:`, e?.message || e);
+          // Tandai di DB kalau mau dilihat status error-nya nanti
+          try {
+            upsertFileMapping(f.id, fileNameInB2, 'error');
+          } catch {}
         }
       }
     }
