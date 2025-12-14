@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon index.js",
+    "migrate:drive:b2": "node utils/migrate-drive-to-b2.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -15,6 +16,7 @@
     "@fastify/cookie": "^10.0.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/multipart": "^9.3.0",
+    "backblaze-b2": "^1.7.1",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",
     "ffmpeg-static": "^5.2.0",

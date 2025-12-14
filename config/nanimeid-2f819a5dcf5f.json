@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "nanimeid",
+  "private_key_id": "2f819a5dcf5fed96f2eb11166d697dca33971ac7",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCThRuMVwk57yxA\nJVxoNKWsEaeNNwTmvx2694ReI28VB+phMz2qXJCJMYXtzjq9fZ+DUfH/XEIBr9ZU\nj1afuHrHdHxTF+MMw9xj0GDU4Erheb5oGWxLoz7DPvirXWaMx8WR6Y8Y4DLOl5S7\nUo43WMfLa2/b7wnK4vpeJFbNErFmARqSMITWXWq1LGqGj67EZsZev1TNmgDCB0UA\naevEkqczjRE8Oc0sju1MHZp7QJ+9mIfTqjx9B4jHWvYLjqtIs4TQrXfKc2Iqw2KT\ndJUecqyR6oUluf7CTDz2rEZGXz7Zd33arif0ESITmZMDo03MFZnhkTakLUWAmMIl\nszvVGxQLAgMBAAECggEAHLmzIxFBpSvbAISl6U6zIf3wE/HuPOZjKiiPeGtK8pvv\nekzpiZZruKNRknxxeLuRB5e52UFEQyLTx/R/aCuakOMwYFfK6Q3siO0nJdylCCHW\nP1wP9+yKSKem8WuHEAvIf4Cs0im6Cvt+RTmuor1hbk114yw5Sm4HVbSayGUG8Tcj\nA0G14MIvy/2TQ7FLagcRF+Vw7pAFBT2iogDbqtl/LNddT61DohP88JdYcVTjSPpW\nEIVX3pQHjKh+3pNQ1pYtoMG3GdOpUQWQDpmgCUIS16sf6tB5oZdNPi6NZKw4Mjia\nWbUCb2QbdKoEOhgr5uiYIXR750MS+RJ+z47A9LJryQKBgQDNPACZ9Ye4pzmpnx/v\nCmipaGDhefog/t2K0VV0GAN4hcZ2K9roCzPYTf2xFMwUIzF6djZnS7gz9mLrx8ZV\nQiXpE4lv6rus0t7GBY5HOKbWifGHFt6obS4SzRFHWXrnvO30Ws9eyJjcoHClle5k\ndTUo/pOE52KhzFoLX5v+QE+1wwKBgQC4AniNo3BUW+91YaxJ9LMYVtaiq0JSLmmX\nhuJdBQ1cgojyfG8oYsAD5lE9SfumPGW6NTF3IZrLtcvYvAAdk+hygZCPXt/04Xqw\n/hVaYzYVaCwx2FMtxOfI0e+UJlKLXBzMcdSxT13vZUTF/NlpTXqA6fWsSUEmtxgc\nNTQlsLscGQKBgHfZRUSjBCnJxbuPB/fwrSPYp1Kkh3PDQZ5yFiPgbg5wmG+jtobx\nG8qB6NcDHRXZY2hvJd/2cNAvXp7vn5tkMH1GgmjPu971mVAsKGTg6VS5Y0kPCuFy\nOIiUJjXzQ/mV86NRcG2aWOHl80JPJtKVO4EAASeIc6mmiyK/J3o3FhU/AoGAEold\nL5eJV1YzlzWRr5mQ+SC2Woi6E6FNTdBuuUQrBmi39wWGBSF9imcHRA9R5HstHEcD\nhqbB+0eDE4BM2q3tuqtGrsq18OtN+sp9yC86YYmu+g56wp+VYeuUIO6DXjqXRBkr\nffkq01T2SqOgGzWM47Ot5f8zKv1C1oSdjjZxgvECgYAu5DBbwiYRMY6PGp4PF7wR\n2jH4r6C9dJQrrRZtz+9ZekfbIlDQ+tEwceyV5N4g/LpuTLYHkjajqFk8MlhHsfRZ\nFF3IZ2aTFhdSnR2gCf7AzuBjL+uP/R3q0vacnzOeXdj80J4w1q1mMMCnu4sfPHr3\nXVYyGMNMSDj9wqRWm2hUug==\n-----END PRIVATE KEY-----\n",
+  "client_email": "migrate-drive@nanimeid.iam.gserviceaccount.com",
+  "client_id": "115891827311490592027",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/migrate-drive%40nanimeid.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
