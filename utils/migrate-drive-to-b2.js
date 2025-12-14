@@ -110,6 +110,8 @@ async function uploadMultipartFromDriveStream({
 
   // Baca file temp per chunk dan upload part secara paralel
   const fd = fs.openSync(tempFilePath, 'r');
+  const stat = fs.statSync(tempFilePath);
+  const fileSize = stat.size;
   const sha1Map = new Map(); // partNumber -> sha1
   let partNumber = 1;
   const concurrencyLimit = MAX_CONCURRENT_PARTS;
@@ -135,11 +137,14 @@ async function uploadMultipartFromDriveStream({
   };
 
   let offset = 0;
-  while (true) {
+  while (offset < fileSize) {
     const buffer = Buffer.allocUnsafe(PART_SIZE);
     const { bytesRead } = fs.readSync(fd, buffer, 0, PART_SIZE, offset);
     if (bytesRead === 0) break;
     const partBuffer = bytesRead < PART_SIZE ? buffer.subarray(0, bytesRead) : buffer;
+
+    // Debug log (opsional, bisa dihapus nanti)
+    console.log(`[DEBUG] offset=${offset}, bytesRead=${bytesRead}, partNumber=${partNumber}`);
 
     // Tunggu slot kosong di pool
     if (activeUploads.length >= concurrencyLimit) {
