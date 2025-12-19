@@ -358,6 +358,16 @@ export async function streamB2Controller(request, reply) {
   }
 
   try {
+    // IMPORTANT: avoid caching HEAD responses (e.g. from `curl -I`) because they have no body and can poison CDN cache.
+    if (String(request.method || '').toUpperCase() === 'HEAD') {
+      const inferred = inferContentTypeFromPath(id) || 'application/octet-stream';
+      return reply
+        .code(200)
+        .header('Content-Type', inferred)
+        .header('Cache-Control', 'no-store')
+        .send();
+    }
+
     const range = request.headers['range'] || request.headers['Range'];
     const ifNoneMatch = request.headers['if-none-match'] || request.headers['If-None-Match'];
     const ifModifiedSince = request.headers['if-modified-since'] || request.headers['If-Modified-Since'];
