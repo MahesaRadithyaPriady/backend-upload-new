@@ -1,4 +1,4 @@
-import { listB2Controller, listB2VideosController, streamB2Controller, listB2FoldersController, createB2FolderController, deleteB2FileController, renameB2FileController } from '../controllers/b2Controller.js';
+import { listB2Controller, listB2VideosController, streamB2Controller, listB2FoldersController, createB2FolderController, deleteB2FileController, renameB2FileController, getB2StreamUrlController } from '../controllers/b2Controller.js';
 import { uploadB2AndCatalogController } from '../controllers/uploadController.js';
 
 export function registerB2Routes(fastify) {
@@ -6,6 +6,7 @@ export function registerB2Routes(fastify) {
   fastify.get('/b2/folders', listB2FoldersController);
   fastify.post('/b2/folder', createB2FolderController);
   fastify.get('/b2/videos', listB2VideosController);
+  fastify.get('/b2/stream-url', getB2StreamUrlController);
   fastify.get('/b2/stream/:id', streamB2Controller);
   fastify.delete('/b2/file', deleteB2FileController);
   fastify.post('/b2/rename', renameB2FileController);

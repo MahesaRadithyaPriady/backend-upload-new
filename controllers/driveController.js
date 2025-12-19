@@ -30,6 +30,103 @@ function inferContentTypeFromPath(p) {
   return map[ext] || null;
 }
 
+const signedUrlCache = new Map();
+const proxySignedUrlCache = new Map();
+
+function debugSignedUrlLog(request, payload, msg) {
+  if (process.env.DEBUG_SIGNED_URL !== 'true') return;
+  try {
+    request?.log?.info(payload, msg);
+  } catch {
+    // ignore
+  }
+}
+
+async function getProxySignedUrl({ fileName, request }) {
+  // Valid 24h, refresh at 23h (1h before expiry)
+  const ttlSeconds = 24 * 3600;
+  const refreshWindowMs = 3600 * 1000;
+  const now = Date.now();
+  const cached = proxySignedUrlCache.get(fileName);
+  if (cached && cached.expiresAtMs - now > refreshWindowMs) {
+    return cached.url;
+  }
+  const url = await getSignedDownloadUrl({ fileName, validDurationInSeconds: ttlSeconds });
+  const expiresAtMs = now + ttlSeconds * 1000;
+  proxySignedUrlCache.set(fileName, { url, expiresAtMs });
+  debugSignedUrlLog(request, { b2ObjectKey: fileName, ttlSeconds, expiresAt: new Date(expiresAtMs).toISOString() }, 'Drive->B2 proxy signed URL refreshed');
+  return url;
+}
+
+function clampInt(n, min, max) {
+  if (n == null) return null;
+  if (typeof n === 'string' && n.trim() === '') return null;
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  return Math.min(Math.max(Math.trunc(v), min), max);
+}
+
+async function getCachedSignedUrl({ fileName, ttlSeconds }) {
+  const now = Date.now();
+  const cached = signedUrlCache.get(fileName);
+  const reuseWindowMs = ttlSeconds && ttlSeconds < 120 ? 1_000 : 60_000;
+  if (cached && cached.ttlSeconds === ttlSeconds && cached.expiresAtMs - now > reuseWindowMs) {
+    return { entry: cached, fromCache: true };
+  }
+
+  const url = await getSignedDownloadUrl({ fileName, validDurationInSeconds: ttlSeconds });
+  const expiresAtMs = now + ttlSeconds * 1000;
+  const entry = { url, expiresAtMs, ttlSeconds };
+  signedUrlCache.set(fileName, entry);
+  return { entry, fromCache: false };
+}
+
+export async function getDriveB2StreamUrlController(request, reply) {
+  const url = new URL(`${request.protocol}://${request.headers.host}${request.raw.url}`);
+  const fromParams = request.params?.id;
+  const fromQuery = request.query?.id || url.searchParams.get('id');
+  const driveFileId = String(fromParams || fromQuery || '').trim();
+
+  if (!driveFileId) {
+    return reply.code(400).send({ error: 'Missing drive file id' });
+  }
+
+  const allowShort = process.env.ALLOW_SHORT_TTL === 'true' || process.env.NODE_ENV !== 'production';
+  const minSeconds = allowShort ? 10 : 300;
+  const minMinutes = allowShort ? 1 : 5;
+
+  const ttlMinutes = clampInt(request.query?.ttlMinutes ?? url.searchParams.get('ttlMinutes'), minMinutes, 60 * 24 * 7);
+  const ttlSeconds = clampInt(request.query?.ttlSeconds ?? url.searchParams.get('ttlSeconds'), minSeconds, 7 * 24 * 3600);
+  const ttl = ttlSeconds ?? (ttlMinutes != null ? ttlMinutes * 60 : 5 * 3600);
+
+  try {
+    const mapping = getDriveB2MappingByDriveId(String(driveFileId));
+    if (!mapping?.b2ObjectKey) {
+      return reply.code(404).send({ error: 'B2 mapping not found for drive file', driveFileId });
+    }
+
+    const { entry, fromCache } = await getCachedSignedUrl({ fileName: mapping.b2ObjectKey, ttlSeconds: ttl });
+    const remainingSeconds = Math.max(0, Math.floor((entry.expiresAtMs - Date.now()) / 1000));
+    debugSignedUrlLog(request, { driveFileId, b2ObjectKey: mapping.b2ObjectKey, ttlSeconds: ttl, remainingSeconds, fromCache }, 'Drive->B2 signed URL issued');
+    return reply
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send({ url: entry.url, expiresInSeconds: remainingSeconds });
+  } catch (err) {
+    request.log.error(
+      {
+        driveFileId,
+        message: err?.message,
+        stack: err?.stack,
+      },
+      'Drive->B2 get stream url error',
+    );
+    return reply.code(500).send({ error: 'Failed to create stream url' });
+  }
+}
+
 async function inferDriveContentType({ driveFileId, resourceKey, fallbackType = null } = {}) {
   try {
     const drive = getDrive();
@@ -179,7 +276,12 @@ export async function streamDriveB2Controller(request, reply) {
     const range = request.headers['range'] || request.headers['Range'];
     const ifNoneMatch = request.headers['if-none-match'] || request.headers['If-None-Match'];
     const ifModifiedSince = request.headers['if-modified-since'] || request.headers['If-Modified-Since'];
-    const signedUrl = await getSignedDownloadUrl({ fileName: mapping.b2ObjectKey });
+    const baseHeaders = {
+      ...(range ? { Range: range } : {}),
+      ...(!range && ifNoneMatch ? { 'If-None-Match': ifNoneMatch } : {}),
+      ...(!range && ifModifiedSince ? { 'If-Modified-Since': ifModifiedSince } : {}),
+    };
+    let signedUrl = await getProxySignedUrl({ fileName: mapping.b2ObjectKey, request });
 
     const controller = new AbortController();
     const onClose = () => {
@@ -193,15 +295,29 @@ export async function streamDriveB2Controller(request, reply) {
     reply.raw.on('close', onClose);
     reply.raw.on('error', onClose);
 
-    const res = await fetch(signedUrl, {
+    let res = await fetch(signedUrl, {
       method: 'GET',
-      headers: {
-        ...(range ? { Range: range } : {}),
-        ...(!range && ifNoneMatch ? { 'If-None-Match': ifNoneMatch } : {}),
-        ...(!range && ifModifiedSince ? { 'If-Modified-Since': ifModifiedSince } : {}),
-      },
+      headers: baseHeaders,
       signal: controller.signal,
     });
+
+    if (res.status === 401 || res.status === 403) {
+      request.log.warn({ driveFileId, b2ObjectKey: mapping.b2ObjectKey, status: res.status }, 'B2 signed URL unauthorized/expired, retrying once');
+      debugSignedUrlLog(request, { driveFileId, b2ObjectKey: mapping.b2ObjectKey, status: res.status }, 'B2 signed URL unauthorized/expired (proxy stream)');
+      try {
+        await res.body?.cancel?.();
+      } catch {
+        // ignore
+      }
+      proxySignedUrlCache.delete(mapping.b2ObjectKey);
+      signedUrl = await getProxySignedUrl({ fileName: mapping.b2ObjectKey, request });
+      debugSignedUrlLog(request, { driveFileId, b2ObjectKey: mapping.b2ObjectKey }, 'B2 signed URL regenerated (proxy stream)');
+      res = await fetch(signedUrl, {
+        method: 'GET',
+        headers: baseHeaders,
+        signal: controller.signal,
+      });
+    }
 
     if (res.status === 304) {
       reply
@@ -217,9 +333,7 @@ export async function streamDriveB2Controller(request, reply) {
     }
 
     const status = res.status || (range ? 206 : 200);
-    const cacheControl = range
-      ? 'no-store'
-      : 'public, max-age=86400, s-maxage=31536000, stale-while-revalidate=604800';
+    const cacheControl = 'public, s-maxage=82800, max-age=0';
     const upstreamType = res.headers.get('content-type') || '';
     let contentType = upstreamType || 'application/octet-stream';
     if (!upstreamType || /^application\/octet-stream\b/i.test(upstreamType)) {
