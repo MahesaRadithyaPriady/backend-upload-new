@@ -1,8 +1,10 @@
-import { Readable } from 'stream';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { Readable } from 'node:stream';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { google } from 'googleapis';
 import { getDrive } from '../lib/drive.js';
+import { getDriveB2MappingByDriveId } from '../lib/fileMappingDb.js';
+import { getSignedDownloadUrl } from '../lib/b2.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -99,6 +101,134 @@ export async function listDriveController(request, reply) {
         Pragma: 'no-cache',
       })
       .send({ error: 'Failed to list files', details });
+  }
+}
+
+export async function streamDriveB2Controller(request, reply) {
+  const url = new URL(`${request.protocol}://${request.headers.host}${request.raw.url}`);
+  const fromParams = request.params?.id;
+  const fromQuery = url.searchParams.get('id');
+  const pathParts = url.pathname.split('/').filter(Boolean);
+  const streamIndex = pathParts.findIndex((p) => p === 'stream-b2');
+  const fromPath = streamIndex !== -1 ? pathParts[streamIndex + 1] : undefined;
+  const driveFileId = fromParams || fromQuery || fromPath;
+
+  if (!driveFileId) {
+    return reply.code(400).send({ error: 'Missing drive file id' });
+  }
+
+  try {
+    const mapping = getDriveB2MappingByDriveId(String(driveFileId));
+    if (!mapping?.b2ObjectKey) {
+      return reply.code(404).send({ error: 'B2 mapping not found for drive file', driveFileId });
+    }
+
+    const range = request.headers['range'] || request.headers['Range'];
+    const ifNoneMatch = request.headers['if-none-match'] || request.headers['If-None-Match'];
+    const ifModifiedSince = request.headers['if-modified-since'] || request.headers['If-Modified-Since'];
+    const signedUrl = await getSignedDownloadUrl({ fileName: mapping.b2ObjectKey });
+
+    const controller = new AbortController();
+    const onClose = () => {
+      try {
+        controller.abort();
+      } catch {
+        // ignore
+      }
+    };
+    request.raw.on('close', onClose);
+    reply.raw.on('close', onClose);
+    reply.raw.on('error', onClose);
+
+    const res = await fetch(signedUrl, {
+      method: 'GET',
+      headers: {
+        ...(range ? { Range: range } : {}),
+        ...(!range && ifNoneMatch ? { 'If-None-Match': ifNoneMatch } : {}),
+        ...(!range && ifModifiedSince ? { 'If-Modified-Since': ifModifiedSince } : {}),
+      },
+      signal: controller.signal,
+    });
+
+    if (res.status === 304) {
+      reply
+        .code(304)
+        .header('ETag', res.headers.get('etag') || '')
+        .header('Last-Modified', res.headers.get('last-modified') || '');
+      return reply.send();
+    }
+
+    if (!res.ok && res.status !== 206) {
+      const text = await res.text().catch(() => '');
+      return reply.code(res.status || 502).send({ error: 'Failed to stream from B2', status: res.status, details: text?.slice(0, 500) });
+    }
+
+    const status = res.status || (range ? 206 : 200);
+    const cacheControl = range
+      ? 'no-store'
+      : 'public, max-age=86400, s-maxage=31536000, stale-while-revalidate=604800';
+    reply.code(status).header('Content-Type', res.headers.get('content-type') || 'application/octet-stream');
+    if (range) reply.header('Vary', 'Range');
+    reply.header('Cache-Control', cacheControl);
+    const srcLen = res.headers.get('content-length');
+    const srcAccept = res.headers.get('accept-ranges');
+    const srcRange = res.headers.get('content-range');
+    const srcEtag = res.headers.get('etag');
+    const srcLM = res.headers.get('last-modified');
+    if (srcLen) reply.header('Content-Length', srcLen);
+    if (srcAccept) reply.header('Accept-Ranges', srcAccept);
+    if (!srcAccept) reply.header('Accept-Ranges', 'bytes');
+    if (srcRange) reply.header('Content-Range', srcRange);
+    if (srcEtag) reply.header('ETag', srcEtag);
+    if (srcLM) reply.header('Last-Modified', srcLM);
+
+    if (!res.body) {
+      return reply.code(502).send({ error: 'Empty body from B2' });
+    }
+
+    return reply.send(res.body);
+  } catch (err) {
+    const msg = String(err?.message || '');
+    if (/operation canceled|aborted|premature|socket hang up|ECONNRESET/i.test(msg)) {
+      request.log.info({ driveFileId, range, message: msg }, 'Drive->B2 stream aborted');
+      // Client likely disconnected; do not crash.
+      return reply;
+    }
+    request.log.error(
+      {
+        driveFileId,
+        message: err?.message,
+        stack: err?.stack,
+      },
+      'Drive->B2 stream error',
+    );
+    return reply.code(500).send({ error: 'Failed to stream via B2 proxy' });
+  }
+}
+
+export async function streamDriveB2MediaController(request, reply) {
+  const url = new URL(`${request.protocol}://${request.headers.host}${request.raw.url}`);
+  const fromParams = request.params?.id;
+  const fromQuery = url.searchParams.get('id');
+  const driveFileId = fromParams || fromQuery;
+
+  if (!driveFileId) {
+    return reply.code(400).send({ error: 'Missing drive file id' });
+  }
+
+  try {
+    // Backward-compatible alias for /drive/stream-b2/:id
+    return streamDriveB2Controller(request, reply);
+  } catch (err) {
+    request.log.error(
+      {
+        driveFileId,
+        message: err?.message,
+        stack: err?.stack,
+      },
+      'Drive->B2 media proxy error',
+    );
+    return reply.code(500).send({ error: 'Failed to stream via B2 proxy' });
   }
 }
 

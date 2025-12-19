@@ -1,41 +1,10 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-import { spawn } from 'child_process';
-import { Readable } from 'stream';
-import { getDrive } from '../lib/drive.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { uploadFromStream } from '../lib/b2.js';
+import { upsertFolder, getFolderByPrefix, upsertFile } from '../lib/storageCatalogDb.js';
 import { setProgress, getProgress } from '../utils/uploadProgress.js';
-
-async function ensureFolderPath(drive, parentId, relativePath) {
-  if (!relativePath) return parentId;
-  const parts = String(relativePath).split('/').map((p) => p.trim()).filter(Boolean);
-  let currentParent = parentId;
-  for (const name of parts) {
-    const res = await drive.files.list({
-      q: `'${currentParent}' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder' and name = '${name.replace(/['\\]/g, "\\$&")}'`,
-      pageSize: 1,
-      fields: 'files(id, name)',
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
-      corpora: 'allDrives',
-    });
-    let folderId = res.data.files && res.data.files[0] ? res.data.files[0].id : null;
-    if (!folderId) {
-      const created = await drive.files.create({
-        requestBody: {
-          name,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [currentParent],
-        },
-        fields: 'id, name',
-        supportsAllDrives: true,
-      });
-      folderId = created.data.id;
-    }
-    currentParent = folderId;
-  }
-  return currentParent;
-}
 
 function checkBinary(binPath, args = ['-version'], timeoutMs = 4000) {
   return new Promise((resolve) => {
@@ -59,6 +28,42 @@ function checkBinary(binPath, args = ['-version'], timeoutMs = 4000) {
       resolve(false);
     }
   });
+}
+
+async function ensureFolderHierarchy(prefix) {
+  const cleaned = String(prefix || '')
+    .replace(/^\/+|\/+$/g, '')
+    .trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  const parts = cleaned
+    .split('/')
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  let currentPrefix = '';
+  let parentId = null;
+
+  for (const part of parts) {
+    currentPrefix = currentPrefix ? `${currentPrefix}${part}/` : `${part}/`;
+
+    let existing = getFolderByPrefix(currentPrefix);
+    if (!existing) {
+      upsertFolder({
+        name: part,
+        prefix: currentPrefix,
+        parentId,
+        fileCount: null,
+      });
+      existing = getFolderByPrefix(currentPrefix);
+    }
+
+    parentId = existing?.id ?? parentId;
+  }
+
+  return parentId;
 }
 
 async function getFfprobePath() {
@@ -180,8 +185,6 @@ export async function uploadDriveController(request, reply) {
       return !(v === '0' || v === 'false' || v === 'no');
     })();
 
-    const drive = getDrive();
-
     const fileName = filePart.filename;
     const fileType = filePart.mimetype || 'application/octet-stream';
     const fileStream = filePart.file; // Node.js Readable
@@ -193,22 +196,27 @@ export async function uploadDriveController(request, reply) {
       return /\.(mp4|mkv|mov|webm|avi|m4v)$/i.test(n);
     })();
 
-    const targetParentId = await ensureFolderPath(drive, folderId, relativePath);
+    const prefixParts = [];
+    if (folderId && folderId !== 'root') prefixParts.push(String(folderId));
+    if (relativePath) prefixParts.push(String(relativePath));
+    const basePrefix = prefixParts
+      .join('/')
+      .split('/')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .join('/');
+    const buildKey = (name) => (basePrefix ? `${basePrefix}/${name}` : name);
 
     if (!isVideo || !wantEncode) {
-      const direct = await drive.files.create({
-        requestBody: { name: fileName, parents: [targetParentId] },
-        media: { mimeType: fileType, body: fileStream },
-        fields: 'id, name',
-        supportsAllDrives: true,
-        uploadType: 'multipart',
-      });
+      const objectKey = buildKey(fileName);
+      await uploadFromStream({ fileName: objectKey, stream: fileStream, contentType: fileType });
+      const fileData = { id: objectKey, name: fileName };
       return reply
         .headers({
           'Cache-Control': 'no-store, no-cache, must-revalidate',
           Pragma: 'no-cache',
         })
-        .send({ files: [direct.data] });
+        .send({ files: [fileData] });
     }
 
     const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -326,14 +334,9 @@ export async function uploadDriveController(request, reply) {
           });
 
           const stream = fs.createReadStream(t.outPath);
-          const res = await drive.files.create({
-            requestBody: { name: t.outName, parents: [targetParentId] },
-            media: { mimeType: 'video/mp4', body: stream },
-            fields: 'id, name',
-            supportsAllDrives: true,
-            uploadType: 'multipart',
-          });
-          created.push(res.data);
+          const objectKey = buildKey(t.outName);
+          await uploadFromStream({ fileName: objectKey, stream, contentType: 'video/mp4' });
+          created.push({ id: objectKey, name: t.outName });
           const afterPct = Math.round(((i + 1) / total) * 100);
           setProgress(jobId, {
             status: 'progress',
@@ -379,6 +382,97 @@ export async function uploadDriveController(request, reply) {
         Pragma: 'no-cache',
       })
       .send({ error: 'Failed to upload file', details: err?.message });
+  }
+}
+
+export async function uploadB2AndCatalogController(request, reply) {
+  try {
+    const filePart = await request.file();
+    if (!filePart) {
+      return reply.code(400).send({ error: 'No file provided' });
+    }
+
+    const fields = filePart.fields || {};
+    const prefixField = fields.prefix && fields.prefix.value;
+    const prefixCleaned = String(prefixField || '')
+      .split('/')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .join('/');
+
+    const fileName = filePart.filename;
+    const fileType = filePart.mimetype || 'application/octet-stream';
+    const fileStream = filePart.file;
+
+    if (!fileName) {
+      return reply.code(400).send({ error: 'Missing filename' });
+    }
+
+    // Hanya izinkan upload video (berdasarkan mimetype dan ekstensi file)
+    const lowerMime = String(fileType).toLowerCase();
+    const videoExt = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v'];
+    const ext = (fileName.lastIndexOf('.') !== -1 ? fileName.slice(fileName.lastIndexOf('.')) : '').toLowerCase();
+    const isVideo = lowerMime.startsWith('video/') || videoExt.includes(ext);
+
+    if (!isVideo) {
+      return reply.code(400).send({ error: 'Only video files are allowed for this endpoint' });
+    }
+
+    const objectKey = prefixCleaned ? `${prefixCleaned}/${fileName}` : fileName;
+
+    const uploadRes = await uploadFromStream({ fileName: objectKey, stream: fileStream, contentType: fileType });
+
+    const parts = String(objectKey)
+      .split('/')
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    const baseName = parts[parts.length - 1];
+    const folderPrefix = parts.length > 1 ? `${parts.slice(0, -1).join('/')}/` : '';
+    const folderId = await ensureFolderHierarchy(folderPrefix);
+
+    const size = Number(uploadRes?.contentLength) || 0;
+    const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
+    const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
+
+    upsertFile({
+      folderId,
+      fileName: baseName,
+      filePath: objectKey,
+      size,
+      contentType,
+      uploadedAt,
+    });
+
+    const item = {
+      id: objectKey,
+      name: baseName,
+      mimeType: contentType,
+      size,
+      modifiedTime: uploadedAt || null,
+    };
+
+    return reply
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send({ files: [item] });
+  } catch (err) {
+    request.log.error(
+      {
+        message: err?.message,
+        stack: err?.stack,
+      },
+      'B2 upload error',
+    );
+    return reply
+      .code(500)
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send({ error: 'Failed to upload file to B2', details: err?.message });
   }
 }
 

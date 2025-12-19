@@ -17,13 +17,14 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/multipart": "^9.3.0",
     "backblaze-b2": "^1.7.1",
-    "better-sqlite3": "^12.5.0",
+    "better-sqlite3": "12.5.0",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",
     "googleapis": "^168.0.0",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "sqlite": "^5.1.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"

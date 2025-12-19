@@ -5,7 +5,9 @@ import multipart from '@fastify/multipart';
 import dotenv from 'dotenv';
 
 import { registerAuthRoutes } from './routes/auth.js';
-import { registerDriveRoutes } from './routes/drive.js';
+import { registerB2Routes } from './routes/b2.js';
+import { registerCatalogRoutes } from './routes/catalog.js';
+import {registerDriveRoutes} from './routes/drive.js'
 
 dotenv.config();
 
@@ -33,6 +35,8 @@ fastify.register(cookie, {
 });
 
 registerAuthRoutes(fastify);
+registerB2Routes(fastify);
+registerCatalogRoutes(fastify);
 registerDriveRoutes(fastify);
 
 const port = Number(process.env.PORT || 4000);

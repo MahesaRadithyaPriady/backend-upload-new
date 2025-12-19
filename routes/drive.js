@@ -7,6 +7,8 @@ import {
   metaDriveController,
   moveDriveController,
   resolveDriveController,
+  streamDriveB2Controller,
+  streamDriveB2MediaController,
   streamDriveController,
   uploadFromLinkDriveController,
 } from '../controllers/driveController.js';
@@ -23,6 +25,8 @@ export function registerDriveRoutes(fastify) {
   fastify.get('/drive/meta/:id', metaDriveController);
   fastify.post('/drive/move', moveDriveController);
   fastify.get('/drive/resolve', resolveDriveController);
+  fastify.get('/drive/stream-b2/:id', streamDriveB2Controller);
+  fastify.get('/drive/stream-b2/media/:id', streamDriveB2MediaController);
   fastify.get('/drive/stream/:id', streamDriveController);
   fastify.post('/drive/upload-from-link', uploadFromLinkDriveController);
   fastify.post('/drive/upload', uploadDriveController);
