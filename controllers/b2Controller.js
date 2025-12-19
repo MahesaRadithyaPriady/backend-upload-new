@@ -1,4 +1,4 @@
-import path from 'node:path';
+import path from 'path';
 import { listFiles, getSignedDownloadUrl, deleteFile, deleteFileByName, copyFileWithinBucket } from '../lib/b2.js';
 import {
   listFoldersByParent,

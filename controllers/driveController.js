@@ -1,6 +1,6 @@
-import { Readable } from 'node:stream';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { Readable } from 'stream';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { google } from 'googleapis';
 import { getDrive } from '../lib/drive.js';
 import { getDriveB2MappingByDriveId } from '../lib/fileMappingDb.js';

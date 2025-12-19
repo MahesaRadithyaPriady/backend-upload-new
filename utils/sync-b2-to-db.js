@@ -1,5 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
 // Jalankan script ini dengan Deno (mode Node compat) atau Node >= 20 (ESM).
 // Contoh Deno:
