@@ -26,9 +26,9 @@ export function registerDriveRoutes(fastify) {
   fastify.get('/drive/meta/:id', metaDriveController);
   fastify.post('/drive/move', moveDriveController);
   fastify.get('/drive/resolve', resolveDriveController);
-  fastify.get('/drive/stream-b2-url/:id', getDriveB2StreamUrlController);
-  fastify.get('/drive/stream-b2/:id', streamDriveB2Controller);
-  fastify.get('/drive/stream-b2/media/:id', streamDriveB2MediaController);
+  fastify.get('/drive/stream-b2-url/:id', { cors: { credentials: false } }, getDriveB2StreamUrlController);
+  fastify.get('/drive/stream-b2/:id', { cors: { credentials: false } }, streamDriveB2Controller);
+  fastify.get('/drive/stream-b2/media/:id', { cors: { credentials: false } }, streamDriveB2MediaController);
   fastify.get('/drive/stream/:id', streamDriveController);
   fastify.post('/drive/upload-from-link', uploadFromLinkDriveController);
   fastify.post('/drive/upload', uploadDriveController);

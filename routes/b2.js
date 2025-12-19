@@ -6,8 +6,8 @@ export function registerB2Routes(fastify) {
   fastify.get('/b2/folders', listB2FoldersController);
   fastify.post('/b2/folder', createB2FolderController);
   fastify.get('/b2/videos', listB2VideosController);
-  fastify.get('/b2/stream-url', getB2StreamUrlController);
-  fastify.get('/b2/stream/:id', streamB2Controller);
+  fastify.get('/b2/stream-url', { cors: { credentials: false } }, getB2StreamUrlController);
+  fastify.get('/b2/stream/:id', { cors: { credentials: false } }, streamB2Controller);
   fastify.delete('/b2/file', deleteB2FileController);
   fastify.post('/b2/rename', renameB2FileController);
   fastify.post('/b2/upload', uploadB2AndCatalogController);
