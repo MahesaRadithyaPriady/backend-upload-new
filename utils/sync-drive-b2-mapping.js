@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
 import { db as catalogDb } from '../lib/storageCatalogDb.js';
-import { upsertDriveB2Mapping } from '../lib/fileMappingDb.js';
+import { getDriveB2MappingByB2ObjectKey, upsertDriveB2Mapping } from '../lib/fileMappingDb.js';
 import { getDrive } from '../lib/drive.js';
 
 dotenv.config();
@@ -307,6 +307,7 @@ async function main() {
   let linked = 0;
   let missing = 0;
   let ambiguous = 0;
+  let alreadyLinked = 0;
 
   const sampleLimit = Number(args.sample ?? 5);
   const sampleLinked = [];
@@ -401,6 +402,18 @@ async function main() {
     }
 
     if (!dryRun) {
+      const existing = getDriveB2MappingByB2ObjectKey(b2ObjectKey);
+      if (existing?.driveFileId && String(existing.driveFileId) !== String(driveFileId)) {
+        alreadyLinked++;
+        if (alreadyLinked <= 5) {
+          console.log('[sync-drive-b2-mapping] Skip (b2ObjectKey already linked)', {
+            b2ObjectKey,
+            existingDriveFileId: existing.driveFileId,
+            driveFileId,
+          });
+        }
+        continue;
+      }
       upsertDriveB2Mapping({
         driveFileId,
         drivePath: normalizePath(drivePath),
@@ -420,7 +433,7 @@ async function main() {
     }
   }
 
-  console.log('[sync-drive-b2-mapping] Done', { linked, missing, ambiguous, dryRun });
+  console.log('[sync-drive-b2-mapping] Done', { linked, missing, ambiguous, alreadyLinked, dryRun });
 
   if (shouldCollectSamples) {
     console.log(dryRun ? '[sync-drive-b2-mapping] Dry-run samples' : '[sync-drive-b2-mapping] Samples', {
