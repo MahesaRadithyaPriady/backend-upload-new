@@ -449,14 +449,43 @@ export async function streamB2Controller(request, reply) {
   }
 
   try {
-    // IMPORTANT: avoid caching HEAD responses (e.g. from `curl -I`) because they have no body and can poison CDN cache.
     if (String(request.method || '').toUpperCase() === 'HEAD') {
-      const inferred = inferContentTypeFromPath(id) || 'application/octet-stream';
-      return reply
-        .code(200)
-        .header('Content-Type', inferred)
-        .header('Cache-Control', 'no-store')
-        .send();
+      const controller = new AbortController();
+      request.raw.on('close', () => controller.abort());
+
+      const signedUrl = await getProxySignedUrl(request, id);
+
+      const res = await fetch(signedUrl, {
+        method: 'HEAD',
+        signal: controller.signal,
+      });
+
+      const upstreamType = res.headers.get('content-type') || '';
+      let contentType = upstreamType || 'application/octet-stream';
+      if (!upstreamType || /^application\/octet-stream\b/i.test(upstreamType)) {
+        const inferred = inferContentTypeFromPath(id);
+        if (inferred) contentType = inferred;
+      }
+
+      const cacheControl = 'public, s-maxage=82800, max-age=0';
+
+      reply
+        .code(res.status || 200)
+        .header('Content-Type', contentType)
+        .header('Cache-Control', cacheControl)
+        .header('Accept-Ranges', res.headers.get('accept-ranges') || 'bytes')
+        .header('Content-Length', res.headers.get('content-length') || '')
+        .header('ETag', res.headers.get('etag') || '')
+        .header('Last-Modified', res.headers.get('last-modified') || '')
+        .header('Vary', 'Range');
+
+      try {
+        reply.removeHeader('Access-Control-Allow-Credentials');
+      } catch {
+        // ignore
+      }
+
+      return reply.send();
     }
 
     const range = request.headers['range'] || request.headers['Range'];
