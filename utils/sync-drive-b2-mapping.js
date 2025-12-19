@@ -199,7 +199,7 @@ async function crawlDriveTree({ rootId, maxFiles = 0 } = {}) {
       items.push({
         driveFileId: f.id,
         drivePath: driveFullPath,
-        driveRelativePath: driveRelPath,
+        driveRelativePath: driveFullPath,
         driveFolderId: folderId,
         driveDriveId: f.driveId || null,
         size: f.size ? Number(f.size) : null,
@@ -348,9 +348,6 @@ async function main() {
     const driveFileId = item.driveFileId || item.id || item.fileId;
     const drivePath = item.drivePath || item.path;
     const driveRelativePath = item.driveRelativePath || (() => {
-      const parts = splitParts(drivePath);
-      // If input contains root folder name as first segment, treat the rest as relative.
-      if (parts.length >= 2) return parts.slice(1).join('/');
       return normalizePath(drivePath);
     })();
     const driveFolderId = item.driveFolderId || item.folderId || null;
