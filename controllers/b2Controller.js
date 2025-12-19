@@ -11,6 +11,30 @@ import {
   updateFilePathAndName,
 } from '../lib/storageCatalogDb.js';
 
+function inferContentTypeFromPath(p) {
+  const ext = String(path.extname(String(p || '')).toLowerCase());
+  if (!ext) return null;
+  const map = {
+    '.mp4': 'video/mp4',
+    '.mkv': 'video/x-matroska',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.flac': 'audio/flac',
+    '.wav': 'audio/wav',
+    '.vtt': 'text/vtt',
+    '.srt': 'text/plain',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+  };
+  return map[ext] || null;
+}
+
 function splitPrefixParts(prefix) {
   return String(prefix || '')
     .split('/')
@@ -378,7 +402,13 @@ export async function streamB2Controller(request, reply) {
     const cacheControl = range
       ? 'no-store'
       : 'public, max-age=86400, s-maxage=31536000, stale-while-revalidate=604800';
-    reply.code(status).header('Content-Type', res.headers.get('content-type') || 'application/octet-stream');
+    const upstreamType = res.headers.get('content-type') || '';
+    let contentType = upstreamType || 'application/octet-stream';
+    if (!upstreamType || /^application\/octet-stream\b/i.test(upstreamType)) {
+      const inferred = inferContentTypeFromPath(id);
+      if (inferred) contentType = inferred;
+    }
+    reply.code(status).header('Content-Type', contentType);
     if (range) reply.header('Vary', 'Range');
     reply.header('Cache-Control', cacheControl);
 

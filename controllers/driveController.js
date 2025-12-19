@@ -6,6 +6,49 @@ import { getDrive } from '../lib/drive.js';
 import { getDriveB2MappingByDriveId } from '../lib/fileMappingDb.js';
 import { getSignedDownloadUrl } from '../lib/b2.js';
 
+function inferContentTypeFromPath(p) {
+  const ext = String(path.extname(String(p || '')).toLowerCase());
+  if (!ext) return null;
+  const map = {
+    '.mp4': 'video/mp4',
+    '.mkv': 'video/x-matroska',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.flac': 'audio/flac',
+    '.wav': 'audio/wav',
+    '.vtt': 'text/vtt',
+    '.srt': 'text/plain',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+  };
+  return map[ext] || null;
+}
+
+async function inferDriveContentType({ driveFileId, resourceKey, fallbackType = null } = {}) {
+  try {
+    const drive = getDrive();
+    const meta = await drive.files.get({
+      fileId: driveFileId,
+      supportsAllDrives: true,
+      resourceKey,
+      fields: 'name,mimeType,fileExtension',
+    });
+    const mimeType = meta?.data?.mimeType || '';
+    if (mimeType && !/^application\/octet-stream\b/i.test(mimeType)) return mimeType;
+    const name = meta?.data?.name || '';
+    const inferred = inferContentTypeFromPath(name);
+    return inferred || fallbackType;
+  } catch {
+    return fallbackType;
+  }
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -167,7 +210,13 @@ export async function streamDriveB2Controller(request, reply) {
     const cacheControl = range
       ? 'no-store'
       : 'public, max-age=86400, s-maxage=31536000, stale-while-revalidate=604800';
-    reply.code(status).header('Content-Type', res.headers.get('content-type') || 'application/octet-stream');
+    const upstreamType = res.headers.get('content-type') || '';
+    let contentType = upstreamType || 'application/octet-stream';
+    if (!upstreamType || /^application\/octet-stream\b/i.test(upstreamType)) {
+      const inferred = inferContentTypeFromPath(mapping.b2ObjectKey);
+      if (inferred) contentType = inferred;
+    }
+    reply.code(status).header('Content-Type', contentType);
     if (range) reply.header('Vary', 'Range');
     reply.header('Cache-Control', cacheControl);
     const srcLen = res.headers.get('content-length');
@@ -611,9 +660,18 @@ export async function streamDriveController(request, reply) {
 
         const srcHeaders = driveRes.headers || {};
         const status = range ? 206 : 200;
+        let contentType = srcHeaders['content-type'] || 'application/octet-stream';
+        if (!contentType || /^application\/octet-stream\b/i.test(contentType)) {
+          contentType =
+            (await inferDriveContentType({
+              driveFileId: id,
+              resourceKey,
+              fallbackType: contentType,
+            })) || contentType;
+        }
         reply
           .code(status)
-          .header('Content-Type', srcHeaders['content-type'] || 'video/mp4')
+          .header('Content-Type', contentType)
           .header('Vary', 'Range')
           .header(
             'Cache-Control',
@@ -652,10 +710,20 @@ export async function streamDriveController(request, reply) {
     const srcEtag = res.headers.get('etag');
     const srcLM = res.headers.get('last-modified');
 
+    let contentType = srcType || 'application/octet-stream';
+    if (!srcType || /^application\/octet-stream\b/i.test(srcType)) {
+      contentType =
+        (await inferDriveContentType({
+          driveFileId: id,
+          resourceKey,
+          fallbackType: contentType,
+        })) || contentType;
+    }
+
     const status = range || srcRange ? 206 : 200;
     reply
       .code(status)
-      .header('Content-Type', srcType || 'video/mp4')
+      .header('Content-Type', contentType)
       .header('Vary', 'Range')
       .header('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
     if (srcLen) reply.header('Content-Length', srcLen);
