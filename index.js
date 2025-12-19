@@ -11,6 +11,13 @@ import {registerDriveRoutes} from './routes/drive.js'
 
 dotenv.config();
 
+const corsOrigins = String(process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const allowedCorsOrigins = corsOrigins.length ? corsOrigins : ['http://localhost:5173'];
+
 const fastify = Fastify({
   logger: true,
   // ~5GB body limit to support large uploads (actual streaming still handled by multipart)
@@ -18,7 +25,7 @@ const fastify = Fastify({
 });
 
 fastify.register(fastifyCors, {
-  origin: [process.env.CORS_ORIGIN || 'http://localhost:5173'],
+  origin: allowedCorsOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 });
