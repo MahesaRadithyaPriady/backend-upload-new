@@ -70,7 +70,12 @@ function startUploadProgressLogger({ request, label, totalBytes }) {
     }
   });
 
-  const onAbort = () => {
+  let finished = false;
+  const onAborted = () => {
+    if (finished) return;
+    // Node sets req.aborted=true only when the client aborts before request is fully received.
+    const aborted = request?.raw?.aborted === true;
+    if (!aborted) return;
     try {
       log?.warn({ label, uploadedBytes: uploaded }, 'Upload aborted by client');
     } catch {
@@ -82,11 +87,12 @@ function startUploadProgressLogger({ request, label, totalBytes }) {
       // ignore
     }
   };
-  request?.raw?.on('close', onAbort);
+  request?.raw?.on('aborted', onAborted);
 
   const cleanup = () => {
+    finished = true;
     try {
-      request?.raw?.off('close', onAbort);
+      request?.raw?.off('aborted', onAborted);
     } catch {
       // ignore
     }
@@ -468,90 +474,112 @@ export async function uploadDriveController(request, reply) {
 
 export async function uploadB2AndCatalogController(request, reply) {
   try {
-    const filePart = await request.file();
-    if (!filePart) {
-      return reply.code(400).send({ error: 'No file provided' });
-    }
+    const files = [];
+    const errors = [];
 
-    const fields = filePart.fields || {};
-    const prefixField = fields.prefix && fields.prefix.value;
-    const prefixCleaned = String(prefixField || '')
-      .split('/')
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .join('/');
+    let prefixCleaned = '';
+    let sizeFromField = NaN;
 
-    const fileName = filePart.filename;
-    const fileType = filePart.mimetype || 'application/octet-stream';
-    const fileStream = filePart.file;
-    const declaredSize = Number(filePart?.fields?.fileSize?.value ?? filePart?.fields?.size?.value ?? NaN);
-
-    if (!fileName) {
-      return reply.code(400).send({ error: 'Missing filename' });
-    }
-
-    // Hanya izinkan upload video (berdasarkan mimetype dan ekstensi file)
-    const lowerMime = String(fileType).toLowerCase();
-    const videoExt = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v'];
-    const ext = (fileName.lastIndexOf('.') !== -1 ? fileName.slice(fileName.lastIndexOf('.')) : '').toLowerCase();
-    const isVideo = lowerMime.startsWith('video/') || videoExt.includes(ext);
-
-    if (!isVideo) {
-      return reply.code(400).send({ error: 'Only video files are allowed for this endpoint' });
-    }
-
-    const objectKey = prefixCleaned ? `${prefixCleaned}/${fileName}` : fileName;
-
-    const logger = startUploadProgressLogger({ request, label: `b2-upload:${objectKey}`, totalBytes: declaredSize });
-    fileStream.pipe(logger.passthrough);
-    let uploadRes;
-    try {
-      uploadRes = await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType });
-      try {
-        request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'B2 upload finished');
-      } catch {
-        // ignore
+    const parts = request.parts();
+    for await (const part of parts) {
+      if (part?.type === 'field') {
+        if (part.fieldname === 'prefix') {
+          prefixCleaned = String(part.value || '')
+            .split('/')
+            .map((p) => p.trim())
+            .filter(Boolean)
+            .join('/');
+        }
+        if (part.fieldname === 'fileSize' || part.fieldname === 'size') {
+          const n = Number(part.value);
+          if (Number.isFinite(n) && n > 0) sizeFromField = n;
+        }
+        continue;
       }
-    } finally {
-      logger.cleanup();
+
+      const fileName = part.filename;
+      const fileType = part.mimetype || 'application/octet-stream';
+      const fileStream = part.file;
+
+      if (!fileName || !fileStream) {
+        continue;
+      }
+
+      // Hanya izinkan upload video (berdasarkan mimetype dan ekstensi file)
+      const lowerMime = String(fileType).toLowerCase();
+      const videoExt = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v'];
+      const ext = (fileName.lastIndexOf('.') !== -1 ? fileName.slice(fileName.lastIndexOf('.')) : '').toLowerCase();
+      const isVideo = lowerMime.startsWith('video/') || videoExt.includes(ext);
+
+      if (!isVideo) {
+        errors.push({ fileName, error: 'Only video files are allowed for this endpoint' });
+        continue;
+      }
+
+      const objectKey = prefixCleaned ? `${prefixCleaned}/${fileName}` : fileName;
+      const declaredSize = Number(part?.fields?.fileSize?.value ?? part?.fields?.size?.value ?? sizeFromField ?? NaN);
+
+      try {
+        const logger = startUploadProgressLogger({ request, label: `b2-upload:${objectKey}`, totalBytes: declaredSize });
+        fileStream.pipe(logger.passthrough);
+        let uploadRes;
+        try {
+          uploadRes = await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType });
+          try {
+            request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'B2 upload finished');
+          } catch {
+            // ignore
+          }
+        } finally {
+          logger.cleanup();
+        }
+
+        const keyParts = String(objectKey)
+          .split('/')
+          .map((p) => p.trim())
+          .filter(Boolean);
+
+        const baseName = keyParts[keyParts.length - 1];
+        const folderPrefix = keyParts.length > 1 ? `${keyParts.slice(0, -1).join('/')}/` : '';
+        const folderId = await ensureFolderHierarchy(folderPrefix);
+
+        const size = Number(uploadRes?.contentLength) || 0;
+        const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
+        const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
+
+        upsertFile({
+          folderId,
+          fileName: baseName,
+          filePath: objectKey,
+          size,
+          contentType,
+          uploadedAt,
+        });
+
+        files.push({
+          id: objectKey,
+          name: baseName,
+          mimeType: contentType,
+          size,
+          modifiedTime: uploadedAt || null,
+        });
+      } catch (e) {
+        errors.push({ fileName, objectKey, error: e?.message || 'Upload failed' });
+      }
     }
 
-    const parts = String(objectKey)
-      .split('/')
-      .map((p) => p.trim())
-      .filter(Boolean);
+    if (files.length === 0 && errors.length) {
+      return reply.code(400).send({ error: 'No files uploaded', errors });
+    }
 
-    const baseName = parts[parts.length - 1];
-    const folderPrefix = parts.length > 1 ? `${parts.slice(0, -1).join('/')}/` : '';
-    const folderId = await ensureFolderHierarchy(folderPrefix);
-
-    const size = Number(uploadRes?.contentLength) || 0;
-    const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
-    const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
-
-    upsertFile({
-      folderId,
-      fileName: baseName,
-      filePath: objectKey,
-      size,
-      contentType,
-      uploadedAt,
-    });
-
-    const item = {
-      id: objectKey,
-      name: baseName,
-      mimeType: contentType,
-      size,
-      modifiedTime: uploadedAt || null,
-    };
-
+    const statusCode = errors.length ? 207 : 200;
     return reply
+      .code(statusCode)
       .headers({
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ files: [item] });
+      .send({ files, errors: errors.length ? errors : undefined });
   } catch (err) {
     request.log.error(
       {
