@@ -18,6 +18,7 @@
     "@fastify/multipart": "^9.3.0",
     "backblaze-b2": "^1.7.1",
     "better-sqlite3": "12.5.0",
+    "crypto": "^1.0.1",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",
     "ffmpeg-static": "^5.2.0",

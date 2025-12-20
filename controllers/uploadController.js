@@ -284,7 +284,7 @@ export async function uploadDriveController(request, reply) {
       const logger = startUploadProgressLogger({ request, label: `drive-upload:${objectKey}`, totalBytes: declaredSize });
       fileStream.pipe(logger.passthrough);
       try {
-        await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType });
+        await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType, expectedSizeBytes: declaredSize });
         try {
           request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'Drive upload finished');
         } catch {
@@ -524,7 +524,7 @@ export async function uploadB2AndCatalogController(request, reply) {
         fileStream.pipe(logger.passthrough);
         let uploadRes;
         try {
-          uploadRes = await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType });
+          uploadRes = await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType, expectedSizeBytes: declaredSize });
           try {
             request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'B2 upload finished');
           } catch {
