@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
+import { PassThrough } from 'stream';
 import { uploadFromStream } from '../lib/b2.js';
 import { upsertFolder, getFolderByPrefix, upsertFile } from '../lib/storageCatalogDb.js';
 import { setProgress, getProgress } from '../utils/uploadProgress.js';
@@ -28,6 +29,70 @@ function checkBinary(binPath, args = ['-version'], timeoutMs = 4000) {
       resolve(false);
     }
   });
+}
+
+function startUploadProgressLogger({ request, label, totalBytes }) {
+  const log = request?.log;
+  const total = Number(totalBytes);
+  const hasTotal = Number.isFinite(total) && total > 0;
+
+  let uploaded = 0;
+  let lastLogAt = 0;
+  let lastPct = -1;
+  const startedAt = Date.now();
+  const intervalMs = 3000;
+
+  const passthrough = new PassThrough();
+  passthrough.on('data', (chunk) => {
+    uploaded += chunk?.length || 0;
+    const now = Date.now();
+    const pct = hasTotal ? Math.floor((uploaded / total) * 100) : null;
+    const shouldLog = now - lastLogAt >= intervalMs || (pct != null && pct !== lastPct && pct % 5 === 0);
+    if (!shouldLog) return;
+    lastLogAt = now;
+    if (pct != null) lastPct = pct;
+    const elapsedSec = Math.max(1, Math.round((now - startedAt) / 1000));
+    const rate = Math.round(uploaded / elapsedSec);
+    try {
+      log?.info(
+        {
+          label,
+          uploadedBytes: uploaded,
+          totalBytes: hasTotal ? total : null,
+          percent: pct,
+          bytesPerSec: rate,
+          elapsedSec,
+        },
+        'Upload progress',
+      );
+    } catch {
+      // ignore
+    }
+  });
+
+  const onAbort = () => {
+    try {
+      log?.warn({ label, uploadedBytes: uploaded }, 'Upload aborted by client');
+    } catch {
+      // ignore
+    }
+    try {
+      passthrough.destroy(new Error('Client aborted upload'));
+    } catch {
+      // ignore
+    }
+  };
+  request?.raw?.on('close', onAbort);
+
+  const cleanup = () => {
+    try {
+      request?.raw?.off('close', onAbort);
+    } catch {
+      // ignore
+    }
+  };
+
+  return { passthrough, getUploadedBytes: () => uploaded, cleanup };
 }
 
 async function ensureFolderHierarchy(prefix) {
@@ -188,6 +253,7 @@ export async function uploadDriveController(request, reply) {
     const fileName = filePart.filename;
     const fileType = filePart.mimetype || 'application/octet-stream';
     const fileStream = filePart.file; // Node.js Readable
+    const declaredSize = Number(filePart?.fields?.fileSize?.value ?? filePart?.fields?.size?.value ?? NaN);
 
     const isVideo = (() => {
       const t = (fileType || '').toLowerCase();
@@ -209,7 +275,18 @@ export async function uploadDriveController(request, reply) {
 
     if (!isVideo || !wantEncode) {
       const objectKey = buildKey(fileName);
-      await uploadFromStream({ fileName: objectKey, stream: fileStream, contentType: fileType });
+      const logger = startUploadProgressLogger({ request, label: `drive-upload:${objectKey}`, totalBytes: declaredSize });
+      fileStream.pipe(logger.passthrough);
+      try {
+        await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType });
+        try {
+          request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'Drive upload finished');
+        } catch {
+          // ignore
+        }
+      } finally {
+        logger.cleanup();
+      }
       const fileData = { id: objectKey, name: fileName };
       return reply
         .headers({
@@ -372,6 +449,10 @@ export async function uploadDriveController(request, reply) {
       {
         message: err?.message,
         stack: err?.stack,
+        code: err?.code,
+        name: err?.name,
+        response: err?.response?.data,
+        status: err?.response?.status,
       },
       'Drive upload error',
     );
@@ -403,6 +484,7 @@ export async function uploadB2AndCatalogController(request, reply) {
     const fileName = filePart.filename;
     const fileType = filePart.mimetype || 'application/octet-stream';
     const fileStream = filePart.file;
+    const declaredSize = Number(filePart?.fields?.fileSize?.value ?? filePart?.fields?.size?.value ?? NaN);
 
     if (!fileName) {
       return reply.code(400).send({ error: 'Missing filename' });
@@ -420,7 +502,19 @@ export async function uploadB2AndCatalogController(request, reply) {
 
     const objectKey = prefixCleaned ? `${prefixCleaned}/${fileName}` : fileName;
 
-    const uploadRes = await uploadFromStream({ fileName: objectKey, stream: fileStream, contentType: fileType });
+    const logger = startUploadProgressLogger({ request, label: `b2-upload:${objectKey}`, totalBytes: declaredSize });
+    fileStream.pipe(logger.passthrough);
+    let uploadRes;
+    try {
+      uploadRes = await uploadFromStream({ fileName: objectKey, stream: logger.passthrough, contentType: fileType });
+      try {
+        request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'B2 upload finished');
+      } catch {
+        // ignore
+      }
+    } finally {
+      logger.cleanup();
+    }
 
     const parts = String(objectKey)
       .split('/')
@@ -463,6 +557,10 @@ export async function uploadB2AndCatalogController(request, reply) {
       {
         message: err?.message,
         stack: err?.stack,
+        code: err?.code,
+        name: err?.name,
+        response: err?.response?.data,
+        status: err?.response?.status,
       },
       'B2 upload error',
     );
