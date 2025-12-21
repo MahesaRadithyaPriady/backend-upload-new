@@ -477,6 +477,8 @@ export async function uploadB2AndCatalogController(request, reply) {
     const files = [];
     const errors = [];
 
+    let sawAnyFilePart = false;
+
     let prefixCleaned = '';
     let sizeFromField = NaN;
 
@@ -497,11 +499,13 @@ export async function uploadB2AndCatalogController(request, reply) {
         continue;
       }
 
+      sawAnyFilePart = true;
       const fileName = part.filename;
       const fileType = part.mimetype || 'application/octet-stream';
       const fileStream = part.file;
 
       if (!fileName || !fileStream) {
+        errors.push({ fileName: fileName || null, error: 'Malformed file part (missing filename or stream)' });
         continue;
       }
 
@@ -564,12 +568,37 @@ export async function uploadB2AndCatalogController(request, reply) {
           modifiedTime: uploadedAt || null,
         });
       } catch (e) {
-        errors.push({ fileName, objectKey, error: e?.message || 'Upload failed' });
+        const status = e?.status || e?.response?.status || e?.response?.data?.status;
+        const code = e?.code || e?.response?.data?.code;
+        const message = e?.response?.data?.message || e?.message || 'Upload failed';
+        errors.push({ fileName, objectKey, error: message, status: status ?? null, code: code ?? null });
       }
     }
 
+    if (!sawAnyFilePart) {
+      try {
+        request.log.warn(
+          {
+            contentType: request?.headers?.['content-type'],
+            contentLength: request?.headers?.['content-length'],
+          },
+          'No file parts detected in multipart request',
+        );
+      } catch {
+        // ignore
+      }
+      return reply.code(400).send({
+        error: 'No files uploaded',
+        details: 'Request did not contain any file parts. Ensure you send multipart/form-data with at least one file field.',
+      });
+    }
+
     if (files.length === 0 && errors.length) {
-      return reply.code(400).send({ error: 'No files uploaded', errors });
+      return reply.code(400).send({ error: 'No valid files uploaded', errors });
+    }
+
+    if (files.length === 0) {
+      return reply.code(400).send({ error: 'No files uploaded' });
     }
 
     const statusCode = errors.length ? 207 : 200;

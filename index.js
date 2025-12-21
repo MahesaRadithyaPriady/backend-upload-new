@@ -16,7 +16,7 @@ const corsOrigins = String(process.env.CORS_ORIGIN || '')
   .map((s) => s.trim())
   .filter(Boolean);
 
-const allowedCorsOrigins = corsOrigins.length ? corsOrigins : ['https://localhost:5173'];
+const allowedCorsOrigins = corsOrigins.length ? corsOrigins : ['http://localhost:5173'];
 
 const fastify = Fastify({
   logger: true,

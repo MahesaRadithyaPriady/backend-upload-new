@@ -18,10 +18,10 @@ Endpoint ini **hanya menerima file video**. File non-video (misalnya PDF, DOCX, 
 
 ## Request
 
-### Field `file` (wajib)
+### File part (wajib)
 
 - Tipe: `file` (multipart)
-- Deskripsi: File video yang akan di-upload.
+- Deskripsi: Satu atau lebih file video yang akan di-upload.
 - Validasi:
   - `mimetype` harus `video/*`, **atau**
   - Ekstensi file termasuk salah satu:
@@ -32,13 +32,10 @@ Endpoint ini **hanya menerima file video**. File non-video (misalnya PDF, DOCX, 
     - `.mov`
     - `.m4v`
 
-Jika file tidak memenuhi kriteria di atas, server akan mengembalikan:
+Catatan:
 
-```json
-{
-  "error": "Only video files are allowed for this endpoint"
-}
-```
+- Backend menerima **lebih dari satu file** dalam 1 request multipart.
+- Nama field file di FormData **tidak wajib** `file` (backend melakukan iterasi `request.parts()` dan mengambil semua part bertipe file). Namun tetap disarankan konsisten menggunakan `file`.
 
 ### Field `prefix` (opsional)
 
@@ -60,6 +57,12 @@ Contoh:
 - `prefix = "courses/kelas-a"`, file `intro.mp4` → `courses/kelas-a/intro.mp4`
 
 Jika `prefix` tidak diisi, file disimpan langsung di root bucket dengan nama asli file.
+
+### Field `fileSize` / `size` (opsional)
+
+- Tipe: `number` (string angka dalam multipart field)
+- Deskripsi: Ukuran file (byte). Field ini digunakan untuk membantu logging progres upload di server.
+- Catatan: Jika tidak dikirim, server masih bisa upload, tetapi log progres akan menampilkan `totalBytes: null` dan `percent: null`.
 
 ---
 
@@ -91,27 +94,40 @@ Keterangan:
 
 ### Error (contoh)
 
-- Tidak ada file:
+- Tidak ada file part sama sekali (bukan multipart / tidak ada file yang di-append):
 
   ```json
   {
-    "error": "No file provided"
+    "error": "No files uploaded",
+    "details": "Request did not contain any file parts. Ensure you send multipart/form-data with at least one file field."
   }
   ```
 
-- Tidak ada `filename`:
+- Ada file part tapi semuanya tidak valid (misalnya bukan video):
 
   ```json
   {
-    "error": "Missing filename"
+    "error": "No valid files uploaded",
+    "errors": [
+      {
+        "fileName": "document.pdf",
+        "error": "Only video files are allowed for this endpoint"
+      }
+    ]
   }
   ```
 
-- File bukan video:
+- Ada file part tapi malformed (tidak ada filename/stream):
 
   ```json
   {
-    "error": "Only video files are allowed for this endpoint"
+    "error": "No valid files uploaded",
+    "errors": [
+      {
+        "fileName": null,
+        "error": "Malformed file part (missing filename or stream)"
+      }
+    ]
   }
   ```
 
@@ -164,6 +180,41 @@ async function uploadVideo({ file, prefix }) {
   return data.files[0]; // { id, name, mimeType, size, modifiedTime }
 }
 ```
+
+Catatan penting untuk frontend:
+
+- Jangan set header `Content-Type: multipart/form-data` secara manual saat mengirim `FormData`.
+  - Browser/axios yang akan mengisi `boundary`.
+  - Jika diset manual, server sering gagal parse multipart dan berujung `No files uploaded`.
+- Jika butuh log progres server yang lebih informatif, kirim `fileSize` atau `size` (byte) sebagai field.
+
+### Upload Video dengan `axios`
+
+```js
+import axios from 'axios';
+
+async function uploadVideoAxios({ file, prefix }) {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (prefix) formData.append('prefix', prefix);
+  formData.append('fileSize', String(file.size));
+
+  const res = await axios.post('/b2/upload', formData, {
+    withCredentials: true,
+  });
+
+  return res.data;
+}
+```
+
+### Troubleshooting (catatan FE)
+
+- **Progress FE 100% tapi respons 400**
+  - Progress FE biasanya hanya menandakan upload dari browser ke server selesai.
+  - Server masih bisa gagal saat proses upload ke B2.
+  - Cek body respons server:
+    - Jika `error: "No files uploaded"`, kemungkinan request bukan multipart atau file tidak ikut terkirim.
+    - Jika `error: "No valid files uploaded"`, cek `errors[]` untuk alasan spesifik (bukan video / malformed / upload ke B2 gagal).
 
 ### Menggunakan ID untuk Streaming Video
 
