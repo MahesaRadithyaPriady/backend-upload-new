@@ -42,4 +42,5 @@ next-env.d.ts
 
 # Local database
 file_mapping.db
+storage_catallog.db
 *.db
