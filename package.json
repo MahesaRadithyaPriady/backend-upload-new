@@ -16,6 +16,8 @@
     "@fastify/cookie": "^10.0.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/multipart": "^9.3.0",
+    "@aws-sdk/client-s3": "^3.760.0",
+    "@aws-sdk/s3-request-presigner": "^3.760.0",
     "backblaze-b2": "^1.7.1",
     "better-sqlite3": "12.5.0",
     "crypto": "^1.0.1",

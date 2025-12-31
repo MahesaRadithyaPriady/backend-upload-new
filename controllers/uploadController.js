@@ -3,7 +3,8 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { PassThrough } from 'stream';
-import { uploadFromStream } from '../lib/b2.js';
+import { uploadFromStream, getB2UploadUrl } from '../lib/b2.js';
+import { createPresignedPutUrl } from '../lib/s3.js';
 import { upsertFolder, getFolderByPrefix, upsertFile } from '../lib/storageCatalogDb.js';
 import { setProgress, getProgress } from '../utils/uploadProgress.js';
 
@@ -135,6 +136,199 @@ async function ensureFolderHierarchy(prefix) {
   }
 
   return parentId;
+}
+
+function normalizeFilePathAndName({ filePath, fileName, prefix }) {
+  const cleanedPrefix = String(prefix || '')
+    .split('/')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .join('/');
+
+  const cleanedPath = String(filePath || '')
+    .replace(/^\/+/, '')
+    .split('/')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .join('/');
+
+  if (cleanedPath) {
+    const parts = cleanedPath.split('/').filter(Boolean);
+    const base = parts[parts.length - 1] || '';
+    const folderPrefix = parts.length > 1 ? `${parts.slice(0, -1).join('/')}/` : '';
+    return {
+      objectKey: cleanedPath,
+      baseName: base,
+      folderPrefix,
+    };
+  }
+
+  const name = String(fileName || '').trim();
+  const objectKey = cleanedPrefix ? `${cleanedPrefix}/${name}` : name;
+  const folderPrefix = cleanedPrefix ? `${cleanedPrefix}/` : '';
+  return {
+    objectKey,
+    baseName: name,
+    folderPrefix,
+  };
+}
+
+export async function getB2UploadUrlController(request, reply) {
+  try {
+    const res = await getB2UploadUrl();
+    if (!res?.uploadUrl || !res?.authorizationToken) {
+      return reply.code(500).send({ error: 'Failed to get B2 upload URL' });
+    }
+    return reply
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send(res);
+  } catch (err) {
+    request.log.error(
+      {
+        message: err?.message,
+        stack: err?.stack,
+      },
+      'B2 get upload url error',
+    );
+    return reply.code(500).send({ error: 'Failed to get B2 upload URL', details: err?.message });
+  }
+}
+
+export async function commitB2UploadController(request, reply) {
+  try {
+    const body = request.body || {};
+    const inputFiles = Array.isArray(body.files) ? body.files : [body];
+
+    const files = [];
+    const errors = [];
+
+    for (const f of inputFiles) {
+      const { filePath, fileName, prefix, size, contentType, uploadedAt } = f || {};
+
+      const norm = normalizeFilePathAndName({ filePath, fileName, prefix });
+      const objectKey = norm.objectKey;
+      const baseName = norm.baseName;
+      const folderPrefix = norm.folderPrefix;
+
+      if (!objectKey || !baseName) {
+        errors.push({ filePath: filePath || null, fileName: fileName || null, error: 'Missing filePath or fileName' });
+        continue;
+      }
+
+      try {
+        const folderId = await ensureFolderHierarchy(folderPrefix);
+        upsertFile({
+          folderId,
+          fileName: baseName,
+          filePath: objectKey,
+          size: Number(size) || 0,
+          contentType: contentType || 'application/octet-stream',
+          uploadedAt: uploadedAt || null,
+        });
+
+        files.push({
+          id: objectKey,
+          name: baseName,
+          mimeType: contentType || 'application/octet-stream',
+          size: Number(size) || 0,
+          modifiedTime: uploadedAt || null,
+        });
+      } catch (e) {
+        errors.push({ fileName: baseName, objectKey, error: e?.message || 'Commit failed' });
+      }
+    }
+
+    if (files.length === 0 && errors.length) {
+      return reply.code(400).send({ error: 'No files committed', errors });
+    }
+
+    const statusCode = errors.length ? 207 : 200;
+    return reply
+      .code(statusCode)
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send({ files, errors: errors.length ? errors : undefined });
+  } catch (err) {
+    request.log.error(
+      {
+        message: err?.message,
+        stack: err?.stack,
+        code: err?.code,
+        name: err?.name,
+      },
+      'B2 upload commit error',
+    );
+    return reply
+      .code(500)
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send({ error: 'Failed to commit upload', details: err?.message });
+  }
+}
+
+export async function getB2S3PresignPutController(request, reply) {
+  try {
+    const q = request.query || {};
+    const body = request.body || {};
+    const input = Object.keys(body).length ? body : q;
+
+    const { filePath, fileName, prefix, contentType } = input || {};
+
+    const norm = normalizeFilePathAndName({ filePath, fileName, prefix });
+    const objectKey = norm.objectKey;
+
+    if (!objectKey) {
+      return reply.code(400).send({ error: 'Missing filePath or (prefix + fileName)' });
+    }
+
+    const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
+    if (!bucket) {
+      return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
+    }
+
+    const expiresInSeconds = (() => {
+      const raw = input?.expiresInSeconds ?? input?.expires ?? input?.ttl;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) return 600;
+      return Math.min(Math.max(Math.trunc(n), 60), 3600);
+    })();
+
+    const signed = await createPresignedPutUrl({
+      bucket,
+      key: objectKey,
+      contentType: contentType || 'application/octet-stream',
+      expiresInSeconds,
+    });
+
+    return reply
+      .headers({
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      })
+      .send({
+        filePath: objectKey,
+        bucket,
+        method: signed.method,
+        url: signed.url,
+        expiresInSeconds,
+      });
+  } catch (err) {
+    request.log.error(
+      {
+        message: err?.message,
+        stack: err?.stack,
+      },
+      'B2 S3 presign error',
+    );
+    return reply.code(500).send({ error: 'Failed to presign upload', details: err?.message });
+  }
 }
 
 async function getFfprobePath() {

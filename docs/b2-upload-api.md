@@ -6,11 +6,26 @@ Dokumen ini menjelaskan API upload video ke Backblaze B2 beserta alur umum dan c
 
 ## Endpoint
 
+- **Method**: `GET`
+- **Path**: `/b2/upload-url`
+
+Mengembalikan `uploadUrl` dan `authorizationToken` dari Backblaze B2 agar frontend bisa upload langsung ke B2.
+
+---
+
 - **Method**: `POST`
 - **Path**: `/b2/upload`
+- **Content-Type**: `application/json`
+
+Endpoint ini digunakan untuk **commit metadata file** setelah frontend berhasil upload langsung ke Backblaze B2. Backend akan mencatat metadata tersebut ke katalog lokal (SQLite).
+
+---
+
+- **Method**: `POST`
+- **Path**: `/b2/upload-multipart`
 - **Content-Type**: `multipart/form-data`
 
-Endpoint ini digunakan untuk **upload file video** ke B2 tanpa proses encoding/transcoding. File dikirim apa adanya, lalu disimpan ke bucket B2 dan dicatat metadatanya di katalog lokal (SQLite).
+Endpoint ini adalah **fallback** untuk upload multipart (server menerima file lalu upload ke B2), dan tetap mencatat metadatanya di katalog lokal (SQLite).
 
 Endpoint ini **hanya menerima file video**. File non-video (misalnya PDF, DOCX, ZIP) akan ditolak dengan status **400**.
 
@@ -18,51 +33,115 @@ Endpoint ini **hanya menerima file video**. File non-video (misalnya PDF, DOCX, 
 
 ## Request
 
-### File part (wajib)
+## Opsi B (Disarankan untuk Browser): B2 S3-Compatible Presigned PUT
 
-- Tipe: `file` (multipart)
-- Deskripsi: Satu atau lebih file video yang akan di-upload.
-- Validasi:
-  - `mimetype` harus `video/*`, **atau**
-  - Ekstensi file termasuk salah satu:
-    - `.mp4`
-    - `.mkv`
-    - `.webm`
-    - `.avi`
-    - `.mov`
-    - `.m4v`
+Jika upload langsung ke endpoint native B2 (`/b2api/v2/b2_upload_file`) terblokir CORS di browser, gunakan alur presigned URL via **B2 S3-Compatible API**.
 
-Catatan:
+### Persiapan (konfigurasi)
 
-- Backend menerima **lebih dari satu file** dalam 1 request multipart.
-- Nama field file di FormData **tidak wajib** `file` (backend melakukan iterasi `request.parts()` dan mengambil semua part bertipe file). Namun tetap disarankan konsisten menggunakan `file`.
+Backend membutuhkan environment variable berikut:
 
-### Field `prefix` (opsional)
+- `B2_S3_ENDPOINT`
+  - Contoh: `https://s3.us-west-000.backblazeb2.com`
+- `B2_S3_REGION`
+  - Default: `us-east-1`
+- `B2_S3_ACCESS_KEY_ID`
+- `B2_S3_SECRET_ACCESS_KEY` (atau `B2_S3_SECRET_APPLICATION_KEY`)
+- `B2_S3_BUCKET_NAME` (atau fallback ke `B2_BUCKET_NAME`)
 
-- Tipe: `string`
-- Deskripsi: Prefix/folder tempat file akan disimpan di B2.
-- Contoh nilai:
-  - `"videos"`
-  - `"courses/kelas-a"`
+Selain itu, di bucket (S3 rules), pastikan **CORS** mengizinkan origin frontend (mis. `http://localhost:5173`) untuk method `PUT`.
 
-Server akan menormalisasi prefix (menghapus spasi dan `/` berlebih), lalu membentuk `objectKey`:
+### 1) Minta presigned URL (FE -> BE)
 
-```text
-<prefix>/<original_filename>
+`GET /b2/s3-presign?filePath=<path>&contentType=<mime>&expiresInSeconds=600`
+
+Response:
+
+```json
+{
+  "filePath": "courses/kelas-a/intro.mp4",
+  "bucket": "<bucket>",
+  "method": "PUT",
+  "url": "https://...presigned...",
+  "expiresInSeconds": 600
+}
 ```
 
-Contoh:
+### 2) Upload ke presigned URL (FE -> B2 S3)
 
-- `prefix = "videos"`, file `intro.mp4` → `videos/intro.mp4`
-- `prefix = "courses/kelas-a"`, file `intro.mp4` → `courses/kelas-a/intro.mp4`
+Frontend melakukan:
 
-Jika `prefix` tidak diisi, file disimpan langsung di root bucket dengan nama asli file.
+- Method: `PUT`
+- URL: `url` dari response presign
+- Body: file (binary)
+- Header (minimal): `Content-Type` harus sama dengan yang digunakan saat presign
 
-### Field `fileSize` / `size` (opsional)
+### 3) Commit metadata (FE -> BE)
 
-- Tipe: `number` (string angka dalam multipart field)
-- Deskripsi: Ukuran file (byte). Field ini digunakan untuk membantu logging progres upload di server.
-- Catatan: Jika tidak dikirim, server masih bisa upload, tetapi log progres akan menampilkan `totalBytes: null` dan `percent: null`.
+Setelah upload sukses, lakukan commit ke backend:
+
+`POST /b2/upload` dengan body JSON seperti bagian **Commit metadata (FE -> BE)** di bawah.
+
+### 1) Ambil upload URL (FE -> BE)
+
+`GET /b2/upload-url`
+
+Response:
+
+```json
+{
+  "uploadUrl": "https://pod-xxxx.backblaze.com/b2api/v2/b2_upload_file/...",
+  "authorizationToken": "xxxx",
+  "bucketId": "xxxx"
+}
+```
+
+### 2) Upload file ke B2 (FE -> B2)
+
+Frontend meng-upload file langsung ke Backblaze B2 menggunakan `uploadUrl` dan `authorizationToken`.
+
+### 3) Commit metadata (FE -> BE)
+
+`POST /b2/upload` (`application/json`)
+
+Body (single file):
+
+```json
+{
+  "filePath": "courses/kelas-a/intro.mp4",
+  "size": 123456,
+  "contentType": "video/mp4",
+  "uploadedAt": "2025-12-17T05:00:00.000Z"
+}
+```
+
+Body (multiple files):
+
+```json
+{
+  "files": [
+    {
+      "filePath": "courses/kelas-a/intro.mp4",
+      "size": 123456,
+      "contentType": "video/mp4",
+      "uploadedAt": "2025-12-17T05:00:00.000Z"
+    }
+  ]
+}
+```
+
+Keterangan field:
+
+- `filePath` (opsional jika pakai `prefix` + `fileName`)
+  - Path lengkap object di B2.
+- `prefix` + `fileName` (opsional)
+  - Alternatif pembentukan `filePath`.
+- `size` (opsional)
+  - Ukuran file dalam byte.
+- `contentType` (opsional)
+  - MIME type file.
+- `uploadedAt` (opsional)
+  - ISO string.
 
 ---
 
@@ -94,38 +173,16 @@ Keterangan:
 
 ### Error (contoh)
 
-- Tidak ada file part sama sekali (bukan multipart / tidak ada file yang di-append):
+- Error commit (contoh):
 
   ```json
   {
-    "error": "No files uploaded",
-    "details": "Request did not contain any file parts. Ensure you send multipart/form-data with at least one file field."
-  }
-  ```
-
-- Ada file part tapi semuanya tidak valid (misalnya bukan video):
-
-  ```json
-  {
-    "error": "No valid files uploaded",
+    "error": "No files committed",
     "errors": [
       {
-        "fileName": "document.pdf",
-        "error": "Only video files are allowed for this endpoint"
-      }
-    ]
-  }
-  ```
-
-- Ada file part tapi malformed (tidak ada filename/stream):
-
-  ```json
-  {
-    "error": "No valid files uploaded",
-    "errors": [
-      {
+        "filePath": null,
         "fileName": null,
-        "error": "Malformed file part (missing filename or stream)"
+        "error": "Missing filePath or fileName"
       }
     ]
   }
@@ -135,86 +192,154 @@ Keterangan:
 
   ```json
   {
-    "error": "Failed to upload file to B2",
+    "error": "Failed to commit upload",
     "details": "<pesan error>"
   }
   ```
+
+
+---
+
+## Endpoint Fallback: Upload Multipart (Server -> B2)
+
+Jika masih butuh mekanisme upload file via backend (multipart), gunakan:
+
+- **Method**: `POST`
+- **Path**: `/b2/upload-multipart`
+- **Content-Type**: `multipart/form-data`
+
+Field yang didukung untuk endpoint ini:
+
+- File part (wajib)
+  - Validasi:
+    - `mimetype` harus `video/*`, **atau**
+    - Ekstensi file termasuk salah satu:
+      - `.mp4`
+      - `.mkv`
+      - `.webm`
+      - `.avi`
+      - `.mov`
+      - `.m4v`
+
+- Field `prefix` (opsional)
+  - Membentuk objectKey: `<prefix>/<original_filename>`
+
+- Field `fileSize` / `size` (opsional)
+  - Membantu logging progres upload di server.
 
 ---
 
 ## Alur Backend (ringkas)
 
-1. Backend membaca `file` dan `prefix` dari `multipart/form-data`.
-2. Validasi nama file (`filename`) dan tipe file (hanya video).
-3. Menentukan `objectKey` berdasarkan `prefix` dan nama file.
-4. Membaca stream file dan mengupload ke B2 **tanpa encoding** menggunakan `uploadFromStream`.
-5. Menyimpan metadata file ke SQLite melalui `upsertFile` (folder, nama file, path, ukuran, `content_type`, waktu upload).
-6. Mengembalikan response JSON berisi array `files` seperti di atas.
+### Alur utama (disarankan): FE -> B2 -> FE -> BE
+
+1. Frontend meminta `uploadUrl` dan `authorizationToken` via `GET /b2/upload-url`.
+2. Frontend upload file langsung ke Backblaze B2.
+3. Setelah upload sukses, frontend melakukan `POST /b2/upload` untuk commit metadata ke SQLite melalui `upsertFile`.
+
+### Alur fallback (lama): FE -> BE -> B2
+
+Gunakan `POST /b2/upload-multipart` jika file masih ingin dikirim via backend.
 
 ---
 
 ## Contoh Penggunaan di Frontend
 
-### Upload Video dengan `fetch` (JavaScript)
+### Upload via S3 Presigned PUT (Browser-friendly)
 
 ```js
-async function uploadVideo({ file, prefix }) {
-  const formData = new FormData();
-  formData.append('file', file); // file: objek File dari input[type=file]
+async function uploadViaPresignedPutAndCommit({ file, prefix }) {
+  const filePath = prefix ? `${prefix.replace(/^\/+|\/+$/g, '')}/${file.name}` : file.name;
 
-  if (prefix) {
-    formData.append('prefix', prefix); // contoh: 'courses/kelas-a'
+  const presign = await fetch(
+    `/b2/s3-presign?filePath=${encodeURIComponent(filePath)}&contentType=${encodeURIComponent(file.type || 'application/octet-stream')}`,
+  ).then((r) => r.json());
+
+  const putRes = await fetch(presign.url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  });
+
+  if (!putRes.ok) {
+    throw new Error(`Upload PUT failed: ${putRes.status}`);
   }
+
+  const commitRes = await fetch('/b2/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filePath,
+      size: file.size,
+      contentType: file.type || 'application/octet-stream',
+      uploadedAt: new Date().toISOString(),
+    }),
+  });
+
+  if (!commitRes.ok) {
+    const err = await commitRes.json().catch(() => ({}));
+    throw new Error(err.error || 'Commit failed');
+  }
+
+  const data = await commitRes.json();
+  return data.files?.[0];
+}
+```
+
+### Upload Video (FE -> B2) lalu Commit (FE -> BE)
+
+```js
+async function uploadVideoAndCommit({ file, prefix }) {
+  const info = await fetch('/b2/upload-url', { method: 'GET' }).then((r) => r.json());
+
+  // Upload ke B2 (detail header B2 menyesuaikan implementasi FE kamu)
+  // Setelah upload sukses, commit metadata ke backend:
+  const filePath = prefix ? `${prefix.replace(/^\/+|\/+$/g, '')}/${file.name}` : file.name;
 
   const res = await fetch('/b2/upload', {
     method: 'POST',
-    body: formData,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filePath,
+      size: file.size,
+      contentType: file.type || 'application/octet-stream',
+      uploadedAt: new Date().toISOString(),
+    }),
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Upload failed');
+    throw new Error(err.error || 'Commit failed');
   }
 
   const data = await res.json();
-  return data.files[0]; // { id, name, mimeType, size, modifiedTime }
+  return data.files?.[0];
 }
 ```
-
-Catatan penting untuk frontend:
-
-- Jangan set header `Content-Type: multipart/form-data` secara manual saat mengirim `FormData`.
-  - Browser/axios yang akan mengisi `boundary`.
-  - Jika diset manual, server sering gagal parse multipart dan berujung `No files uploaded`.
-- Jika butuh log progres server yang lebih informatif, kirim `fileSize` atau `size` (byte) sebagai field.
 
 ### Upload Video dengan `axios`
 
 ```js
 import axios from 'axios';
 
-async function uploadVideoAxios({ file, prefix }) {
-  const formData = new FormData();
-  formData.append('file', file);
-  if (prefix) formData.append('prefix', prefix);
-  formData.append('fileSize', String(file.size));
-
-  const res = await axios.post('/b2/upload', formData, {
-    withCredentials: true,
-  });
-
+async function commitUploadAxios({ filePath, size, contentType, uploadedAt }) {
+  const res = await axios.post(
+    '/b2/upload',
+    { filePath, size, contentType, uploadedAt },
+    { withCredentials: true },
+  );
   return res.data;
 }
 ```
 
 ### Troubleshooting (catatan FE)
 
-- **Progress FE 100% tapi respons 400**
-  - Progress FE biasanya hanya menandakan upload dari browser ke server selesai.
-  - Server masih bisa gagal saat proses upload ke B2.
-  - Cek body respons server:
-    - Jika `error: "No files uploaded"`, kemungkinan request bukan multipart atau file tidak ikut terkirim.
-    - Jika `error: "No valid files uploaded"`, cek `errors[]` untuk alasan spesifik (bukan video / malformed / upload ke B2 gagal).
+- **Upload ke B2 sukses tapi commit gagal**
+  - Cek respons `POST /b2/upload`.
+  - Pastikan `filePath` sesuai object key di B2.
+  - Jika mengirim batch, perhatikan response `207` yang berarti ada sebagian file yang gagal commit.
 
 ### Menggunakan ID untuk Streaming Video
 
