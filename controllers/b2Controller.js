@@ -231,6 +231,17 @@ export async function listB2Controller(request, reply) {
       }
     }
 
+    // Jika ada playlist HLS (index.m3u8) di prefix ini, tampilkan paling atas.
+    // Jangan mengubah urutan item lain.
+    try {
+      const idx = items.findIndex((it) => String(it?.name || '').toLowerCase() === 'index.m3u8');
+      if (idx > 0) {
+        const [picked] = items.splice(idx, 1);
+        items.unshift(picked);
+      }
+    } catch {
+    }
+
     const hasMore = items.length === limit;
     const nextPageToken = hasMore ? String(page + 1) : null;
 

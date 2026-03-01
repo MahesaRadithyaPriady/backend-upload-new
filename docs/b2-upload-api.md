@@ -37,6 +37,8 @@ Endpoint ini **hanya menerima file video**. File non-video (misalnya PDF, DOCX, 
 
 Jika upload langsung ke endpoint native B2 (`/b2api/v2/b2_upload_file`) terblokir CORS di browser, gunakan alur presigned URL via **B2 S3-Compatible API**.
 
+Catatan: alur presigned PUT ini **tidak bisa digunakan untuk encode**. Jika `encode=1`, file harus dikirim ke backend via `POST /b2/upload-folder-multipart` agar backend bisa memproses HLS.
+
 ### Persiapan (konfigurasi)
 
 Backend membutuhkan environment variable berikut:
@@ -64,6 +66,45 @@ Response:
   "method": "PUT",
   "url": "https://...presigned...",
   "expiresInSeconds": 600
+}
+```
+
+### (Opsional) Batch presign (untuk upload banyak file / folder)
+
+Jika kamu upload banyak file dan sebagian presigned URL expired (karena upload lama), kamu bisa request ulang presigned URL secara batch:
+
+- **Method**: `POST`
+- **Path**: `/b2/s3-presign-batch`
+- **Content-Type**: `application/json`
+
+Body:
+
+```json
+{
+  "files": [
+    {
+      "filePath": "Nanti Conto/720p/eps1.mp4",
+      "contentType": "video/mp4",
+      "expiresInSeconds": 600
+    }
+  ]
+}
+```
+
+Response (200 atau 207):
+
+```json
+{
+  "files": [
+    {
+      "filePath": "Nanti Conto/720p/eps1.mp4",
+      "bucket": "<bucket>",
+      "method": "PUT",
+      "url": "https://...presigned...",
+      "expiresInSeconds": 600
+    }
+  ],
+  "errors": []
 }
 ```
 
@@ -340,6 +381,12 @@ async function commitUploadAxios({ filePath, size, contentType, uploadedAt }) {
   - Cek respons `POST /b2/upload`.
   - Pastikan `filePath` sesuai object key di B2.
   - Jika mengirim batch, perhatikan response `207` yang berarti ada sebagian file yang gagal commit.
+
+- **Upload ke presigned URL gagal (expired / signature mismatch)**
+  - Minta ulang presigned URL untuk file tersebut lewat:
+    - `GET /b2/s3-presign` (single), atau
+    - `POST /b2/s3-presign-batch` (batch)
+  - Lalu ulangi `PUT` ke URL baru.
 
 ### Menggunakan ID untuk Streaming Video
 

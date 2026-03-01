@@ -23,6 +23,14 @@ const fastify = Fastify({
   // ~5GB body limit to support large uploads (actual streaming still handled by multipart)
   bodyLimit: 5 * 1024 * 1024 * 1024,
 });
+
+// Treat binary/video request bodies as streams (for direct PUT upload flow)
+fastify.addContentTypeParser('application/octet-stream', (req, payload, done) => {
+  done(null, payload);
+});
+fastify.addContentTypeParser(/^video\//, (req, payload, done) => {
+  done(null, payload);
+});
   
 fastify.register(fastifyCors, {
   origin: allowedCorsOrigins,
