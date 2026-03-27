@@ -1,0 +1,30 @@
+const config = {
+  CLIENT_ID: '536941617808-rbh80ov8ogarl7kviva3n4r0avbt231q.apps.googleusercontent.com',
+  CLIENT_SECRET: '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',
+  REFRESH_TOKEN: '1//0404FQ8KModvfCgYIARAAGAQSNwF-L9Ir_Ueo7MBSuNR7QIZ49uQaBc9ocEnMf4ybrdQS6tQ7k_XGZ20cE7TyPcUCiF_z4IFUgRQ',
+  REDIRECT_URI: 'http://localhost',
+  ADMIN_API_BASE: 'http://localhost:3000/2.1.0',
+
+  B2_APPLICATION_KEY_ID: '4e7fc05ceb59',
+  B2_APPLICATION_KEY: '00578f265a4382e4888b5b9c002c8166e53819b1b8',
+  B2_BUCKET_NAME: 'NanimeID',
+  B2_SIGNED_URL_TTL: 86400,
+
+  B2_S3_ENDPOINT: 'https://s3.us-east-005.backblazeb2.com',
+  B2_S3_REGION: 'us-east-005',
+  B2_S3_ACCESS_KEY_ID: '0054e7fc05ceb590000000003',
+  B2_S3_SECRET_ACCESS_KEY: 'K005GFB/XiANNns19ftRfHf12YvumfE',
+
+  NODE_ENV: 'production',
+  DEBUG_SIGNED_URL: true,
+  FORCE_FULL_STREAM_200: true,
+
+  PORT: 4000,
+};
+
+export default config;
+
+export {
+  config,
+  config as settings,
+};

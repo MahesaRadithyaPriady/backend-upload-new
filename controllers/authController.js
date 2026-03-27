@@ -1,4 +1,5 @@
 import fetch from 'node-fetch';
+import config from '../config/config.js';
 
 export async function loginController(request, reply) {
   try {
@@ -13,7 +14,7 @@ export async function loginController(request, reply) {
         .send({ error: 'Missing username or password' });
     }
 
-    const base = process.env.ADMIN_API_BASE;
+    const base = config.ADMIN_API_BASE;
     try {
       request.log.info({ base }, '[auth/login] ADMIN_API_BASE');
     } catch (_) {
@@ -72,7 +73,7 @@ export async function loginController(request, reply) {
           code,
           message: msg,
           upstreamStatus: res.status,
-          upstreamRaw: process.env.NODE_ENV !== 'production' ? raw : undefined,
+          upstreamRaw: config.NODE_ENV !== 'production' ? raw : undefined,
         });
     }
 
@@ -90,7 +91,7 @@ export async function loginController(request, reply) {
         // Biarkan dapat diakses FE agar bisa dibaca via document.cookie
         httpOnly: false,
         sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        secure: config.NODE_ENV === 'production',
         path: '/',
         maxAge: 60 * 60 * 8,
       })

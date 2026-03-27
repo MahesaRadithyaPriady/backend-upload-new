@@ -29,6 +29,7 @@ Di sini FE hanya mengirim **URL**. Backend akan:
 
 ```json
 {
+  "jobId": "custom_job_123",
   "sourceUrl": "https://example.com/video.mp4",
   "prefix": "test",
   "relativePath": "720p/eps1.mp4",
@@ -47,6 +48,7 @@ Keterangan:
 - `fileName` (opsional): dipakai jika `relativePath` kosong.
   - Jika kosong juga, backend akan coba ambil dari nama file pada URL.
 - `contentType` (opsional): override content-type.
+- `jobId` (opsional): jika FE ingin subscribe progress lebih awal, FE boleh mengirim `jobId` sendiri.
 - `encode` (opsional):
   - `1`/`true` → encode HLS
   - `0`/`false` → upload original
@@ -64,6 +66,7 @@ Jika `encode=0`:
 ```json
 {
   "jobId": "<jobId>",
+  "ssePath": "/b2/upload-job-sse/<jobId>",
   "files": [
     {
       "id": "test/720p/eps1.mp4",
@@ -78,9 +81,12 @@ Jika `encode=0`:
 
 Jika `encode=1`:
 
+- Nama folder HLS dan nama segmen output akan dinormalisasi menjadi **URL-safe** agar aman dipakai di CDN/player.
+
 ```json
 {
   "jobId": "<jobId>",
+  "ssePath": "/b2/upload-job-sse/<jobId>",
   "files": [
     {
       "id": "test/720p/eps1/index.m3u8",
@@ -98,6 +104,8 @@ Jika `encode=1`:
 ## Progress (Polling / SSE)
 
 Gunakan endpoint job yang sama:
+
+- Setelah response sukses, FE bisa langsung pakai `jobId` atau `ssePath` dari response.
 
 - Polling:
   - `GET /b2/upload-job/:id`

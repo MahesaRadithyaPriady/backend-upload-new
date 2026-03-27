@@ -5,6 +5,7 @@ import { google } from 'googleapis';
 import { getDrive } from '../lib/drive.js';
 import { getDriveB2MappingByDriveId } from '../lib/fileMappingDb.js';
 import { getSignedDownloadUrl } from '../lib/b2.js';
+import config from '../config/config.js';
 
 function inferContentTypeFromPath(p) {
   const ext = String(path.extname(String(p || '')).toLowerCase());
@@ -34,7 +35,7 @@ const signedUrlCache = new Map();
 const proxySignedUrlCache = new Map();
 
 function debugSignedUrlLog(request, payload, msg) {
-  if (process.env.DEBUG_SIGNED_URL !== 'true') return;
+  if (!config.DEBUG_SIGNED_URL) return;
   try {
     request?.log?.info(payload, msg);
   } catch {
@@ -91,7 +92,7 @@ export async function getDriveB2StreamUrlController(request, reply) {
     return reply.code(400).send({ error: 'Missing drive file id' });
   }
 
-  const allowShort = process.env.ALLOW_SHORT_TTL === 'true' || process.env.NODE_ENV !== 'production';
+  const allowShort = process.env.ALLOW_SHORT_TTL === 'true' || config.NODE_ENV !== 'production';
   const minSeconds = allowShort ? 10 : 300;
   const minMinutes = allowShort ? 1 : 5;
 

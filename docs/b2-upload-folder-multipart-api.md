@@ -17,6 +17,17 @@ Catatan: untuk menghindari masalah urutan multipart (mis. file terkirim duluan b
 - `/b2/upload-folder-multipart?prefix=test`
 - `/b2/upload-folder-multipart?prefix=test&encode=1`
 
+Jika FE ingin memakai `jobId` sendiri agar bisa subscribe SSE lebih awal, backend juga menerima:
+
+- query `jobId`
+- query `job_id`
+- header `x-upload-job-id`
+
+Untuk kasus **`encode=1`**, ini adalah cara yang disarankan.
+Namun perlu dicatat: flow ini tetap diproses backend **satu per satu / sequential**, bukan semua file diproses paralel sekaligus.
+Jadi kelebihannya bukan membuat seluruh upload folder jadi lebih cepat, tetapi membuat job bisa **ditinggal jalan** sambil FE tetap memantau progress lewat `jobId`.
+FE cukup membuat `jobId` sendiri, kirim saat request upload dimulai, lalu gunakan endpoint status / SSE memakai `jobId` itu.
+
 ---
 
 ## Request
@@ -35,9 +46,11 @@ Catatan: untuk menghindari masalah urutan multipart (mis. file terkirim duluan b
 - **Field `encode`** (opsional)
   - Jika `encode=1` / `true`, backend akan memproses video menjadi **HLS** (playlist `.m3u8` + segmen `.ts`) lalu upload hasilnya ke B2.
   - Proses HLS menggunakan `ffmpeg -c copy` (tanpa re-encode) sehingga tidak menurunkan kualitas.
+  - Saat packaging HLS, backend hanya membawa **video utama** dan **audio utama**. Subtitle, attachment font, dan stream data lain dari file seperti MKV tidak ikut dipaketkan ke output HLS.
   - **Penting (path output HLS)**: hasil HLS akan diupload ke folder berbasis **object key input tanpa ekstensi**.
     - Jika input video diupload sebagai: `<objectKey>.mp4`
-    - Maka output HLS akan berada di: `<objectKey>/index.m3u8` dan `<objectKey>/<basename>_00001.ts` dst.
+    - Nama folder HLS dan nama segmen akan dinormalisasi menjadi **URL-safe**. Karakter seperti spasi, `[` `]`, dan simbol lain akan diganti agar path aman dipakai di CDN/player.
+    - Maka output HLS akan berada di folder turunan dari `<objectKey>` dengan nama leaf yang sudah dinormalisasi, misalnya `Kira/Test/My_Video/index.m3u8` dan `Kira/Test/My_Video/My_Video_00001.ts` dst.
     - Artinya: folder/prefix dari `prefix` + `relativePath` tetap dipakai.
 
 - **Field `relativePath` / `filePath` / `path`** (opsional, per file)
@@ -70,6 +83,8 @@ Jika `encode=1`, maka output HLS untuk contoh di atas akan menjadi:
 - Playlist: `Nanti Conto/720p/eps1/index.m3u8`
 - Segmen: `Nanti Conto/720p/eps1/eps1_00001.ts`, `.../eps1_00002.ts`, dst.
 
+Jika nama file asli mengandung karakter yang tidak aman untuk URL/CDN, nama folder HLS dan nama segmen hasil encode akan memakai bentuk yang sudah dinormalisasi.
+
 - Jika `relativePath` tidak ada:
   - `objectKey = <prefix>/<filename>`
 
@@ -77,11 +92,37 @@ Jika `encode=1`, maka output HLS untuk contoh di atas akan menjadi:
 
 ## Response
 
+### Catatan penting untuk `encode=1`
+
+Pada flow multipart, backend membaca body upload sebagai stream multipart lalu memproses file yang masuk di request yang sama.
+Untuk banyak file dalam satu folder, backend tetap menjalankan proses ini **berurutan per file**, jadi perilakunya tetap seperti antre satu-satu.
+Artinya untuk kasus `encode=1`, response JSON biasanya baru diterima FE setelah fase berikut selesai:
+
+1. body upload selesai diterima backend
+2. encode / packaging HLS selesai
+3. file output HLS (`index.m3u8` dan `.ts`) selesai diupload ke B2
+
+Jadi benar: pada flow ini request upload tidak langsung selesai saat file pertama selesai terkirim dari FE.
+Request baru selesai setelah pekerjaan pada request tersebut selesai diproses backend.
+
+Artinya, untuk upload folder, endpoint ini **bukan** mekanisme agar semua file encode/upload bersamaan.
+Nilai utamanya adalah request bisa dibiarkan berjalan dan FE tetap bisa melihat status realtime tanpa harus menunggu response akhir lebih dulu.
+
+Karena itu, jika FE ingin langsung tracking progress encode **tanpa menunggu response upload selesai**, gunakan pola berikut:
+
+1. FE generate `jobId` sendiri.
+2. FE kirim `jobId` lewat query `jobId` / `job_id` atau header `x-upload-job-id`.
+3. FE bisa langsung membuka SSE ke `/b2/upload-job-sse/:jobId` **atau** mulai cek `GET /b2/upload-job/:jobId`.
+4. Jika `GET /b2/upload-job/:jobId` masih `404`, anggap job belum aktif / belum tercatat di storage job backend.
+5. Jika endpoint check sudah mengembalikan `200`, FE bisa memakai hasil itu sebagai status awal lalu menjaga koneksi SSE tetap aktif untuk update realtime.
+6. Backend akan membuat job sejak awal request masuk dengan status awal seperti `receiving`, lalu berubah ke `encoding` saat proses encode dimulai.
+
 ### Sukses (200)
 
 ```json
 {
   "jobId": "<jobId>",
+  "ssePath": "/b2/upload-job-sse/<jobId>",
   "files": [
     {
       "id": "Nanti Conto/720p/eps1/index.m3u8",
@@ -116,9 +157,36 @@ Response:
 
 Response dari endpoint ini selalu mengembalikan `jobId`. FE bisa polling progress:
 
+- Jika response juga mengandung `ssePath`, FE bisa langsung pakai path tersebut.
+- Jika FE ingin tracking saat upload masih berlangsung, jangan tunggu response ini. Gunakan `jobId` yang sudah FE kirim sendiri sejak awal request.
+
 - `GET /b2/upload-job/:id`
 - atau `GET /b2/upload-job?id=<jobId>`
 - atau `GET /b2/upload-job-by-prefix?prefix=<prefix>`
+
+Perilaku yang disarankan di FE:
+
+- Jika `GET /b2/upload-job/:id` mengembalikan `404`, anggap job **belum aktif / belum tercatat**.
+- FE boleh retry ringan beberapa kali sambil upload request masih berjalan.
+- Begitu `GET /b2/upload-job/:id` mengembalikan `200`, gunakan data job itu untuk menampilkan status awal.
+- Setelah itu, teruskan update realtime lewat SSE agar FE tidak perlu polling rapat.
+
+Contoh response job aktif:
+
+```json
+{
+  "id": "job_abc123",
+  "prefix": "Kira/Test",
+  "status": "encoding",
+  "current": "Kira/Test/720p/eps1.mkv",
+  "done": 0,
+  "total": 1,
+  "percent": 17,
+  "error": null,
+  "created_at_ms": 1711270000000,
+  "updated_at_ms": 1711270005234
+}
+```
 
 ## Live progress via SSE (FE)
 
@@ -132,9 +200,18 @@ Event yang dikirim:
 
 - `hello`
 - `update` (payload = row job dari SQLite)
-- `not_found`
+- `not_found` (job belum aktif / belum tercatat)
 - `end`
 - `error`
+
+Untuk flow multipart + `encode=1`, pola yang aman di FE biasanya seperti ini:
+
+1. FE generate `jobId`.
+2. FE mulai upload multipart sambil mengirim `jobId`.
+3. FE buka SSE ke `/b2/upload-job-sse/:jobId`.
+4. Jika SSE mengirim `not_found`, FE anggap job belum aktif lalu biarkan koneksi retry / reconnect.
+5. Saat event `update` mulai masuk, FE tampilkan progress realtime dari field `status`, `current`, dan `percent`.
+6. Saat event `end` masuk, FE tutup koneksi SSE.
 
 Contoh penggunaan (browser):
 
@@ -220,6 +297,7 @@ Pastikan `prefix` ditambahkan ke `FormData` sebelum file, atau gunakan query str
 
 ```js
 async function uploadFolderMultipart({ files, prefix, encode }) {
+  const jobId = `job_${Date.now()}`;
   const fd = new FormData();
   if (prefix) fd.append('prefix', prefix);
   if (encode) fd.append('encode', '1');
@@ -232,14 +310,46 @@ async function uploadFolderMultipart({ files, prefix, encode }) {
   const qs = new URLSearchParams();
   if (prefix) qs.set('prefix', prefix);
   if (encode) qs.set('encode', '1');
+  qs.set('jobId', jobId);
 
-  const res = await fetch(`/b2/upload-folder-multipart?${qs.toString()}`, {
+  async function waitUntilJobActive() {
+    for (let i = 0; i < 20; i += 1) {
+      const r = await fetch(`/b2/upload-job/${encodeURIComponent(jobId)}`);
+      if (r.status === 200) return r.json();
+      if (r.status !== 404) throw new Error(`Failed to check job: ${r.status}`);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return null;
+  }
+
+  const es = new EventSource(`/b2/upload-job-sse/${encodeURIComponent(jobId)}`);
+  es.addEventListener('not_found', () => {
+    console.log('job belum aktif');
+  });
+  es.addEventListener('update', (ev) => {
+    const job = JSON.parse(ev.data);
+    console.log('progress', job.status, job.percent);
+  });
+  es.addEventListener('end', () => {
+    es.close();
+  });
+
+  const uploadPromise = fetch(`/b2/upload-folder-multipart?${qs.toString()}`, {
     method: 'POST',
     body: fd,
   });
-  return res.json();
+
+  const job = await waitUntilJobActive();
+  console.log('job aktif', job);
+
+  const res = await uploadPromise;
+  const data = await res.json();
+  return { jobId, job, data, es };
 }
 ```
+
+Jika kamu tidak ingin polling sama sekali, FE juga bisa langsung mengandalkan SSE.
+Namun endpoint `GET /b2/upload-job/:id` tetap berguna sebagai check awal apakah row job sudah aktif atau masih `404`.
 
 ---
 
@@ -247,3 +357,5 @@ async function uploadFolderMultipart({ files, prefix, encode }) {
 
 - Endpoint ini **menyimpan struktur folder** (prefix seperti `720p/`) dari `relativePath`.
 - Endpoint ini **mengupload ke B2 lewat backend** (lebih berat dibanding presigned PUT).
+- Untuk banyak file, proses tetap **sequential / satu per satu** di backend.
+- Kelebihan utamanya adalah job bisa **ditinggal** sambil tetap dipantau lewat `GET /b2/upload-job/:id` atau SSE `/b2/upload-job-sse/:id`.

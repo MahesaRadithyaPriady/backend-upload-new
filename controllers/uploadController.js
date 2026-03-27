@@ -8,6 +8,7 @@ import { createPresignedPutUrl } from '../lib/s3.js';
 import { upsertFolder, getFolderByPrefix, upsertFile } from '../lib/storageCatalogDb.js';
 import { setProgress, getProgress } from '../utils/uploadProgress.js';
 import { upsertJob, updateJobThrottled, getJobById, getJobByPrefix, listJobs, deleteJobById } from '../lib/uploadJobsDb.js';
+import config from '../config/config.js';
 
 const g = typeof globalThis !== 'undefined' ? globalThis : global;
 if (!g.__uploadJobCancelRegistry) {
@@ -19,6 +20,11 @@ if (!g.__directUploadLinkRegistry) {
   g.__directUploadLinkRegistry = new Map();
 }
 const directUploadRegistry = g.__directUploadLinkRegistry;
+
+if (!g.__uploadJobCleanupRegistry) {
+  g.__uploadJobCleanupRegistry = new Map();
+}
+const cleanupRegistry = g.__uploadJobCleanupRegistry;
 
 function getCancelState(jobId) {
   if (!jobId) return null;
@@ -64,6 +70,48 @@ function clearCancelState(jobId) {
     cancelRegistry.delete(jobId);
   } catch {
   }
+  try {
+    cleanupRegistry.delete(jobId);
+  } catch {
+  }
+}
+
+function registerJobCleanup(jobId, fn) {
+  if (!jobId || typeof fn !== 'function') return () => {};
+  if (!cleanupRegistry.has(jobId)) {
+    cleanupRegistry.set(jobId, new Set());
+  }
+  const set = cleanupRegistry.get(jobId);
+  set.add(fn);
+  return () => {
+    try {
+      set.delete(fn);
+      if (set.size === 0) {
+        cleanupRegistry.delete(jobId);
+      }
+    } catch {
+    }
+  };
+}
+
+function runJobCleanup(jobId) {
+  if (!jobId) return;
+  const set = cleanupRegistry.get(jobId);
+  if (!set || set.size === 0) return;
+  for (const fn of Array.from(set)) {
+    try {
+      fn();
+    } catch {
+    }
+  }
+}
+
+function removeDirSafe(dirPath) {
+  if (!dirPath) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch {
+  }
 }
 
 function checkBinary(binPath, args = ['-version'], timeoutMs = 4000) {
@@ -92,6 +140,60 @@ function checkBinary(binPath, args = ['-version'], timeoutMs = 4000) {
       resolve(false);
     }
   });
+}
+
+function makeJobId() {
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeRequestedJobId(value) {
+  const cleaned = String(value || '').trim();
+  if (!cleaned) return null;
+  if (!/^[A-Za-z0-9_-]{6,120}$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+function resolveRequestedJobId(...values) {
+  for (const value of values) {
+    const normalized = normalizeRequestedJobId(value);
+    if (normalized) return normalized;
+  }
+  return makeJobId();
+}
+
+function buildUploadJobSsePath(jobId) {
+  if (!jobId) return null;
+  return `/b2/upload-job-sse/${encodeURIComponent(jobId)}`;
+}
+
+function parseFfmpegProgressSec(input) {
+  const m = /time=([0-9:.]+)/.exec(String(input || ''));
+  if (!m || !m[1]) return NaN;
+  return parseDurationToSec(m[1]);
+}
+
+function updateEncodeJobProgress(jobId, { current, seconds, duration, pctMin = 1, pctMax = 49 } = {}) {
+  if (!jobId) return null;
+  const prev = getJobById(jobId);
+  const prevPercent = Number(prev?.percent);
+  let percent = Number.isFinite(prevPercent) ? prevPercent : 0;
+
+  if (Number.isFinite(duration) && duration > 0 && Number.isFinite(seconds) && seconds >= 0) {
+    const frac = Math.max(0, Math.min(1, seconds / duration));
+    percent = pctMin + Math.round(frac * (pctMax - pctMin));
+  } else if (Number.isFinite(seconds) && seconds >= 0) {
+    const stepped = pctMin + Math.floor(seconds / 6);
+    percent = Math.max(percent, stepped);
+  } else {
+    percent = Math.max(percent, pctMin);
+  }
+
+  percent = Math.max(pctMin, Math.min(pctMax, percent));
+  return updateJobThrottled(
+    jobId,
+    { status: 'encoding', current: current ?? prev?.current ?? null, percent },
+    { minIntervalMs: 800, minPercentDelta: 1 },
+  );
 }
 
 export async function streamUploadJobsSseController(request, reply) {
@@ -176,28 +278,46 @@ function parseEncodeFlag(v) {
   return !(s === '' || s === '0' || s === 'false' || s === 'no' || s === 'off');
 }
 
+function buildSafeHlsName(value, fallback = 'video') {
+  const normalized = String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[_ .-]+|[_ .-]+$/g, '');
+  return normalized || fallback;
+}
+
 function buildHlsOutputPrefix({ objectKey }) {
   const cleaned = String(objectKey || '').replace(/^\/+/, '');
   if (!cleaned) return '';
   const ext = path.extname(cleaned);
   const baseNoExt = ext ? cleaned.slice(0, -ext.length) : cleaned;
-  return `${baseNoExt}/`;
+  const parentDir = path.posix.dirname(baseNoExt);
+  const rawLeaf = path.posix.basename(baseNoExt);
+  const safeLeaf = buildSafeHlsName(rawLeaf);
+  return parentDir && parentDir !== '.' ? `${parentDir}/${safeLeaf}/` : `${safeLeaf}/`;
 }
 
 async function packageToHls({ inputPath, outDir, baseName, ffmpegPath, threads = 4, onProgress }) {
   fs.mkdirSync(outDir, { recursive: true });
   const playlistName = 'index.m3u8';
   const playlistPath = path.join(outDir, playlistName);
-  const segmentPattern = path.join(outDir, `${baseName}_%05d.ts`);
+  const safeBaseName = buildSafeHlsName(baseName);
+  const segmentPattern = path.join(outDir, `${safeBaseName}_%05d.ts`);
 
   const args = [
     '-y',
     '-i',
     inputPath,
+    '-map',
+    '0:v:0?',
+    '-map',
+    '0:a:0?',
+    '-sn',
+    '-dn',
     '-c',
     'copy',
-    '-map',
-    '0',
     '-f',
     'hls',
     '-hls_time',
@@ -447,7 +567,7 @@ export async function importB2ByUrlController(request, reply) {
       return lower ? lower.startsWith('video/') : false;
     })();
 
-    jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    jobId = resolveRequestedJobId(body?.jobId, body?.job_id, request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
     upsertJob({ id: jobId, prefix: prefixCleaned || null, status: 'downloading', current: objectKey, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
 
@@ -510,6 +630,9 @@ export async function importB2ByUrlController(request, reply) {
       updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 0 });
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+      const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
+        removeDirSafe(tmpDir);
+      });
       try {
         const ffmpegPath = await getFfmpegPath();
         const ffmpegOk = await checkBinary(ffmpegPath);
@@ -527,8 +650,10 @@ export async function importB2ByUrlController(request, reply) {
         } catch {
         }
 
+        updateEncodeJobProgress(jobId, { current: objectKey, seconds: 0 });
+
         await new Promise((resolve, reject) => {
-          const base = baseName.replace(/\.[^/.]+$/, '') || 'video';
+          const base = buildSafeHlsName(baseName.replace(/\.[^/.]+$/, '') || 'video');
           const playlistPath = path.join(hlsOutDir, 'index.m3u8');
           fs.mkdirSync(hlsOutDir, { recursive: true });
           const segmentPattern = path.join(hlsOutDir, `${base}_%05d.ts`);
@@ -536,10 +661,14 @@ export async function importB2ByUrlController(request, reply) {
             '-y',
             '-i',
             'pipe:0',
+            '-map',
+            '0:v:0?',
+            '-map',
+            '0:a:0?',
+            '-sn',
+            '-dn',
             '-c',
             'copy',
-            '-map',
-            '0',
             '-f',
             'hls',
             '-hls_time',
@@ -563,7 +692,12 @@ export async function importB2ByUrlController(request, reply) {
 
           let stderr = '';
           p.stderr.on('data', (d) => {
-            stderr += d.toString();
+            const s = d.toString();
+            stderr += s;
+            const sec = parseFfmpegProgressSec(s);
+            if (Number.isFinite(sec)) {
+              updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec });
+            }
             if (isCancelled(jobId)) {
               try {
                 p.kill('SIGKILL');
@@ -642,10 +776,8 @@ export async function importB2ByUrlController(request, reply) {
           modifiedTime: new Date().toISOString(),
         });
       } finally {
-        try {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-        }
+        unregisterTmpCleanup();
+        removeDirSafe(tmpDir);
       }
     } else {
       updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 0 });
@@ -676,7 +808,7 @@ export async function importB2ByUrlController(request, reply) {
 
     return reply
       .headers({ 'Cache-Control': 'no-store, no-cache, must-revalidate', Pragma: 'no-cache' })
-      .send({ jobId, files });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files });
   } catch (err) {
     request.log.error({ message: err?.message, stack: err?.stack }, 'Import by URL error');
     if (jobId) {
@@ -686,10 +818,14 @@ export async function importB2ByUrlController(request, reply) {
         updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Import failed', percent: 100 });
       }
     }
-    return reply.code(500).send({ error: 'Failed to import by URL', details: err?.message, jobId });
+    return reply.code(500).send({ error: 'Failed to import by URL', details: err?.message, jobId, ssePath: buildUploadJobSsePath(jobId) });
   } finally {
     try {
       unregisterAbort?.();
+    } catch {
+    }
+    try {
+      clearCancelState(jobId);
     } catch {
     }
   }
@@ -720,7 +856,7 @@ export async function createDirectUploadLinkController(request, reply) {
     })();
     const expiresAtMs = Date.now() + ttlSeconds * 1000;
 
-    const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const jobId = resolveRequestedJobId(body?.jobId, body?.job_id, request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
     upsertJob({ id: jobId, prefix: prefix || null, status: 'waiting_upload', current: null, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
 
@@ -745,6 +881,7 @@ export async function createDirectUploadLinkController(request, reply) {
       .headers({ 'Cache-Control': 'no-store, no-cache, must-revalidate', Pragma: 'no-cache' })
       .send({
         jobId,
+        ssePath: buildUploadJobSsePath(jobId),
         method: 'PUT',
         uploadUrl: uploadPath,
         expiresInSeconds: ttlSeconds,
@@ -817,6 +954,9 @@ export async function directUploadPutController(request, reply) {
   try {
     if (entry.encode) {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+      const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
+        removeDirSafe(tmpDir);
+      });
       try {
         const ffmpegPath = await getFfmpegPath();
         const ffmpegOk = await checkBinary(ffmpegPath);
@@ -834,8 +974,10 @@ export async function directUploadPutController(request, reply) {
         } catch {
         }
 
+        updateEncodeJobProgress(jobId, { current: objectKey, seconds: 0 });
+
         await new Promise((resolve, reject) => {
-          const base = baseName.replace(/\.[^/.]+$/, '') || 'video';
+          const base = buildSafeHlsName(baseName.replace(/\.[^/.]+$/, '') || 'video');
           const playlistPath = path.join(hlsOutDir, 'index.m3u8');
           fs.mkdirSync(hlsOutDir, { recursive: true });
           const segmentPattern = path.join(hlsOutDir, `${base}_%05d.ts`);
@@ -843,10 +985,14 @@ export async function directUploadPutController(request, reply) {
             '-y',
             '-i',
             'pipe:0',
+            '-map',
+            '0:v:0?',
+            '-map',
+            '0:a:0?',
+            '-sn',
+            '-dn',
             '-c',
             'copy',
-            '-map',
-            '0',
             '-f',
             'hls',
             '-hls_time',
@@ -870,7 +1016,12 @@ export async function directUploadPutController(request, reply) {
 
           let stderr = '';
           p.stderr.on('data', (d) => {
-            stderr += d.toString();
+            const s = d.toString();
+            stderr += s;
+            const sec = parseFfmpegProgressSec(s);
+            if (Number.isFinite(sec)) {
+              updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec });
+            }
             if (isCancelled(jobId)) {
               try {
                 p.kill('SIGKILL');
@@ -950,10 +1101,8 @@ export async function directUploadPutController(request, reply) {
           modifiedTime: new Date().toISOString(),
         });
       } finally {
-        try {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-        }
+        unregisterTmpCleanup();
+        removeDirSafe(tmpDir);
       }
     } else {
       const logger = startUploadProgressLogger({ request, label: `b2-direct:${objectKey}`, totalBytes: declaredSize });
@@ -982,7 +1131,7 @@ export async function directUploadPutController(request, reply) {
 
     return reply
       .headers({ 'Cache-Control': 'no-store, no-cache, must-revalidate', Pragma: 'no-cache' })
-      .send({ jobId, files });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files });
   } catch (err) {
     request.log.error({ message: err?.message, stack: err?.stack }, 'Direct upload error');
     if (jobId) {
@@ -992,10 +1141,14 @@ export async function directUploadPutController(request, reply) {
         updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Upload failed', percent: 100 });
       }
     }
-    return reply.code(500).send({ error: 'Failed to upload', details: err?.message, jobId });
+    return reply.code(500).send({ error: 'Failed to upload', details: err?.message, jobId, ssePath: buildUploadJobSsePath(jobId) });
   } finally {
     try {
       directUploadRegistry.delete(token);
+    } catch {
+    }
+    try {
+      clearCancelState(jobId);
     } catch {
     }
   }
@@ -1133,7 +1286,7 @@ export async function getB2S3PresignPutController(request, reply) {
       return reply.code(400).send({ error: 'Missing filePath or (prefix + fileName)' });
     }
 
-    const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
+    const bucket = process.env.B2_S3_BUCKET_NAME || config.B2_BUCKET_NAME;
     if (!bucket) {
       return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
     }
@@ -1192,7 +1345,7 @@ export async function getB2S3PresignPutBatchController(request, reply) {
       return reply.code(400).send({ error: 'Missing files array' });
     }
 
-    const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
+    const bucket = process.env.B2_S3_BUCKET_NAME || config.B2_BUCKET_NAME;
     if (!bucket) {
       return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
     }
@@ -1432,7 +1585,13 @@ export async function uploadDriveController(request, reply) {
         .send({ files: [fileData] });
     }
 
-    const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const jobId = resolveRequestedJobId(
+      fields?.jobId?.value,
+      fields?.job_id?.value,
+      request.query?.jobId,
+      request.query?.job_id,
+      request.headers?.['x-upload-job-id'],
+    );
     setProgress(jobId, { status: 'preparing', current: null, done: 0, total: 4, percent: 0 });
 
     (async () => {
@@ -1579,7 +1738,7 @@ export async function uploadDriveController(request, reply) {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ jobId, status: 'started' });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), status: 'started' });
   } catch (err) {
     request.log.error(
       {
@@ -1772,7 +1931,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
     let sizeFromField = NaN;
     let encodeGlobal = parseEncodeFlag(request.query?.encode);
 
-    jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    jobId = resolveRequestedJobId(request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
     upsertJob({ id: jobId, prefix: null, status: 'receiving', current: null, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
 
@@ -1864,6 +2023,9 @@ export async function uploadB2FolderMultipartController(request, reply) {
 
         if (wantEncode) {
           const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+          const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
+            removeDirSafe(tmpDir);
+          });
           try {
             const ffmpegPath = await getFfmpegPath();
             const ffmpegOk = await checkBinary(ffmpegPath);
@@ -1882,13 +2044,14 @@ export async function uploadB2FolderMultipartController(request, reply) {
             }
 
             updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 0 });
+            updateEncodeJobProgress(jobId, { current: objectKey, seconds: 0 });
 
             if (isCancelled(jobId)) {
               throw new Error('Job cancelled');
             }
 
             await new Promise((resolve, reject) => {
-              const base = baseName.replace(/\.[^/.]+$/, '') || 'video';
+              const base = buildSafeHlsName(baseName.replace(/\.[^/.]+$/, '') || 'video');
               const playlistPath = path.join(hlsOutDir, 'index.m3u8');
               fs.mkdirSync(hlsOutDir, { recursive: true });
               const segmentPattern = path.join(hlsOutDir, `${base}_%05d.ts`);
@@ -1896,10 +2059,14 @@ export async function uploadB2FolderMultipartController(request, reply) {
                 '-y',
                 '-i',
                 'pipe:0',
+                '-map',
+                '0:v:0?',
+                '-map',
+                '0:a:0?',
+                '-sn',
+                '-dn',
                 '-c',
                 'copy',
-                '-map',
-                '0',
                 '-f',
                 'hls',
                 '-hls_time',
@@ -1967,6 +2134,10 @@ export async function uploadB2FolderMultipartController(request, reply) {
                 const m = /time=([0-9:.]+)/.exec(s);
                 if (m && m[1]) {
                   lastTimeStr = m[1];
+                  const sec = parseDurationToSec(m[1]);
+                  if (Number.isFinite(sec)) {
+                    updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec });
+                  }
                   const now = Date.now();
                   if (now - lastProgressLogAt >= 3000) {
                     lastProgressLogAt = now;
@@ -2108,10 +2279,8 @@ export async function uploadB2FolderMultipartController(request, reply) {
               modifiedTime: new Date().toISOString(),
             });
           } finally {
-            try {
-              fs.rmSync(tmpDir, { recursive: true, force: true });
-            } catch {
-            }
+            unregisterTmpCleanup();
+            removeDirSafe(tmpDir);
           }
 
           continue;
@@ -2194,7 +2363,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ jobId, files, errors: errors.length ? errors : undefined });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files, errors: errors.length ? errors : undefined });
   } catch (err) {
     request.log.error(
       {
@@ -2221,7 +2390,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ error: 'Failed to upload folder to B2', details: err?.message });
+      .send({ error: 'Failed to upload folder to B2', details: err?.message, jobId, ssePath: buildUploadJobSsePath(jobId) });
   } finally {
     try {
       clearCancelState(jobId);
@@ -2237,15 +2406,15 @@ export async function deleteUploadJobController(request, reply) {
   const existing = getJobById(id);
   if (!existing) {
     cancelJob(id);
-    clearCancelState(id);
+    runJobCleanup(id);
     deleteJobById(id);
     return reply.headers({ 'Cache-Control': 'no-store' }).send({ ok: true });
   }
 
   cancelJob(id);
+  runJobCleanup(id);
   updateJobThrottled(id, { status: 'cancelled', error: 'Cancelled', percent: 100 });
   deleteJobById(id);
-  clearCancelState(id);
 
   return reply.headers({ 'Cache-Control': 'no-store' }).send({ ok: true });
 }

@@ -1,4 +1,4 @@
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 
 // Jalankan script ini dengan Deno (mode Node compat) atau Node >= 20 (ESM).
@@ -15,8 +15,10 @@ const __dirname = path.dirname(__filename);
 const b2ModulePath = path.join(__dirname, '..', 'lib', 'b2.js');
 const catalogModulePath = path.join(__dirname, '..', 'lib', 'storageCatalogDb.js');
 
-const { listFiles } = await import(b2ModulePath);
-const { upsertFolder, getFolderByPrefix, upsertFile } = await import(catalogModulePath);
+const { listFiles } = await import(pathToFileURL(b2ModulePath).href);
+const { upsertFolder, getFolderByPrefix, upsertFile } = await import(
+  pathToFileURL(catalogModulePath).href,
+);
 
 function splitPathParts(fullPath) {
   return String(fullPath)
@@ -128,5 +130,9 @@ syncAllFiles()
       message: err?.message,
       stack: err?.stack,
     });
-    Deno?.exit?.(1);
+    if (typeof Deno !== 'undefined' && typeof Deno.exit === 'function') {
+      Deno.exit(1);
+    } else if (typeof process !== 'undefined' && typeof process.exit === 'function') {
+      process.exit(1);
+    }
   });
