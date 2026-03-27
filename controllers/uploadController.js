@@ -1928,8 +1928,38 @@ export async function uploadB2FolderMultipartController(request, reply) {
 
     let sawAnyFilePart = false;
     let prefixCleaned = cleanRelativePath(request.query?.prefix ?? request.query?.pathPrefix ?? request.query?.basePrefix);
-    let sizeFromField = NaN;
+    const relativePathQueue = [];
+    const sizeQueue = [];
+    const relativePathCursor = { i: 0 };
+    const sizeCursor = { i: 0 };
     let encodeGlobal = parseEncodeFlag(request.query?.encode);
+
+    const consumeFromPartFields = (part, names, cursor) => {
+      const fields = part?.fields;
+      if (!fields || typeof fields !== 'object') return undefined;
+
+      const normalize = (v) => {
+        if (!v) return [];
+        return Array.isArray(v) ? v : [v];
+      };
+
+      const candidates = [];
+      for (const name of names) {
+        if (Object.prototype.hasOwnProperty.call(fields, name)) {
+          candidates.push(...normalize(fields[name]));
+        }
+      }
+
+      if (!candidates.length) return undefined;
+      const idx = Number(cursor?.i || 0);
+      if (idx > 0 && candidates.length === 1) {
+        cursor.i = idx + 1;
+        return undefined;
+      }
+      const chosen = candidates[Math.min(idx, candidates.length - 1)];
+      cursor.i = idx + 1;
+      return chosen?.value;
+    };
 
     jobId = resolveRequestedJobId(request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
     upsertJob({ id: jobId, prefix: null, status: 'receiving', current: null, done: 0, total: 0, percent: 0 });
@@ -1942,16 +1972,24 @@ export async function uploadB2FolderMultipartController(request, reply) {
     const parts = request.parts();
     for await (const part of parts) {
       if (part?.type === 'field') {
-        if (part.fieldname === 'prefix') {
+        const fieldname = String(part.fieldname || '');
+
+        if (fieldname === 'prefix') {
           prefixCleaned = cleanRelativePath(part.value);
           updateJobThrottled(jobId, { prefix: prefixCleaned || null });
         }
-        if (part.fieldname === 'encode') {
+        if (fieldname === 'encode') {
           encodeGlobal = parseEncodeFlag(part.value);
         }
-        if (part.fieldname === 'fileSize' || part.fieldname === 'size') {
+
+        if (/^(relativePath|filePath|path)(\[[0-9]*\])?$/.test(fieldname)) {
+          const cleaned = cleanRelativePath(part.value);
+          if (cleaned) relativePathQueue.push(cleaned);
+        }
+
+        if (/^(fileSize|size)(\[[0-9]*\])?$/.test(fieldname)) {
           const n = Number(part.value);
-          if (Number.isFinite(n) && n > 0) sizeFromField = n;
+          if (Number.isFinite(n) && n > 0) sizeQueue.push(n);
         }
         continue;
       }
@@ -1984,7 +2022,13 @@ export async function uploadB2FolderMultipartController(request, reply) {
         continue;
       }
 
-      const relativePathField = part?.fields?.relativePath?.value ?? part?.fields?.filePath?.value ?? part?.fields?.path?.value;
+      const queuedRelativePath = relativePathQueue.length ? relativePathQueue.shift() : undefined;
+      const relativePathField =
+        queuedRelativePath ??
+        part?.fields?.relativePath?.value ??
+        part?.fields?.filePath?.value ??
+        part?.fields?.path?.value ??
+        consumeFromPartFields(part, ['relativePath', 'filePath', 'path'], relativePathCursor);
       const relativePathCleaned = (() => {
         const fromField = cleanRelativePath(relativePathField);
         if (fromField) return fromField;
@@ -1993,13 +2037,24 @@ export async function uploadB2FolderMultipartController(request, reply) {
         return '';
       })();
 
+      const relativePathNoDupPrefix = (() => {
+        if (!relativePathCleaned) return '';
+        const firstSeg = relativePathCleaned.split('/').filter(Boolean)[0] || '';
+        if (!firstSeg) return relativePathCleaned;
+        if (prefixCleaned === firstSeg || prefixCleaned.endsWith(`/${firstSeg}`)) {
+          const rest = relativePathCleaned.split('/').filter(Boolean).slice(1).join('/');
+          return rest || '';
+        }
+        return relativePathCleaned;
+      })();
+
       const encodePerFile = parseEncodeFlag(part?.fields?.encode?.value);
       const wantEncode = encodePerFile || encodeGlobal;
 
       const effectiveFileName = relativePathCleaned ? fileNameFromPath : fileNameFromPath;
 
       const norm = normalizeFilePathAndName({
-        filePath: relativePathCleaned,
+        filePath: relativePathNoDupPrefix,
         fileName: effectiveFileName,
         prefix: prefixCleaned,
       });
@@ -2007,7 +2062,14 @@ export async function uploadB2FolderMultipartController(request, reply) {
       const objectKey = norm.objectKey;
       const baseName = norm.baseName;
       const folderPrefix = norm.folderPrefix;
-      const declaredSize = Number(part?.fields?.fileSize?.value ?? part?.fields?.size?.value ?? sizeFromField ?? NaN);
+      const queuedSize = sizeQueue.length ? sizeQueue.shift() : undefined;
+      const declaredSize = Number(
+        queuedSize ??
+          part?.fields?.fileSize?.value ??
+          part?.fields?.size?.value ??
+          consumeFromPartFields(part, ['fileSize', 'size'], sizeCursor) ??
+          NaN,
+      );
 
       if (!objectKey || !baseName) {
         errors.push({ fileName: effectiveFileName, relativePath: relativePathCleaned || null, error: 'Missing objectKey after normalization' });

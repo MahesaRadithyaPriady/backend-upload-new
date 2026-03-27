@@ -60,6 +60,12 @@ FE cukup membuat `jobId` sendiri, kirim saat request upload dimulai, lalu gunaka
     - Menyimpan object key persis sesuai path tersebut (digabung dengan `prefix` bila ada)
     - Membuat folder hierarchy di katalog lokal (SQLite) berdasarkan path itu.
 
+Catatan penting (multipart payload):
+
+- Beberapa client mengirim field `relativePath` dan `fileSize` sebagai field biasa yang berulang (bukan menempel di `part.fields` untuk tiap file).
+- Backend akan membaca field-field tersebut sebagai **antrian (queue)** dan memasangkannya ke file yang diupload secara **berurutan**.
+- Dengan begitu file ke-2 dan seterusnya tetap akan masuk ke subfolder yang benar (mis. `Video/...`), bukan jatuh langsung ke root prefix.
+
 - **Fallback: path di `filename`**
   - Jika client mengirim `filename` yang sudah mengandung folder (mis. `test/video1.mp4`), backend akan menganggap itu sebagai `relativePath`.
   - Jadi object key akan menjadi `test/video1.mp4` (atau `<prefix>/test/video1.mp4` jika `prefix` diisi), dan folder `test/` akan ikut tercatat.
