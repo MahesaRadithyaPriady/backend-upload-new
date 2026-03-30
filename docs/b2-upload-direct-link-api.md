@@ -101,7 +101,7 @@ Logic backend:
 
 - Jika `encode=1` saat buat link:
   - stream dari client → `ffmpeg` (stdin)
-  - output HLS (`index.m3u8` + `.ts`) diupload ke B2
+  - output HLS fMP4 (`index.m3u8` + init `.mp4` + segmen `.m4s`) diupload ke B2
   - nama folder HLS dan nama segmen dinormalisasi menjadi **URL-safe** agar aman dipakai di CDN/player
 - Jika `encode=0`:
   - stream dari client → upload ke B2 sebagai file original
@@ -203,7 +203,7 @@ Ringkasnya:
 
 - `encode=1`:
   - stream dari URL remote → `ffmpeg` (stdin)
-  - output HLS (`index.m3u8` + `.ts`) diupload ke B2
+  - output HLS fMP4 (`index.m3u8` + init `.mp4` + segmen `.m4s`) diupload ke B2
   - **tanpa re-encode** (menggunakan `ffmpeg -c copy`)
   - progress tetap lewat `jobId` + SSE yang sama (`/b2/upload-job-sse/:jobId`)
 - `encode=0`:

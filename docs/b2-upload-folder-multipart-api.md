@@ -44,13 +44,13 @@ FE cukup membuat `jobId` sendiri, kirim saat request upload dimulai, lalu gunaka
   - Contoh: `Nanti Conto`.
 
 - **Field `encode`** (opsional)
-  - Jika `encode=1` / `true`, backend akan memproses video menjadi **HLS** (playlist `.m3u8` + segmen `.ts`) lalu upload hasilnya ke B2.
+  - Jika `encode=1` / `true`, backend akan memproses video menjadi **HLS fMP4** (playlist `.m3u8` + init `.mp4` + segmen `.m4s`) lalu upload hasilnya ke B2.
   - Proses HLS menggunakan `ffmpeg -c copy` (tanpa re-encode) sehingga tidak menurunkan kualitas.
   - Saat packaging HLS, backend hanya membawa **video utama** dan **audio utama**. Subtitle, attachment font, dan stream data lain dari file seperti MKV tidak ikut dipaketkan ke output HLS.
   - **Penting (path output HLS)**: hasil HLS akan diupload ke folder berbasis **object key input tanpa ekstensi**.
     - Jika input video diupload sebagai: `<objectKey>.mp4`
     - Nama folder HLS dan nama segmen akan dinormalisasi menjadi **URL-safe**. Karakter seperti spasi, `[` `]`, dan simbol lain akan diganti agar path aman dipakai di CDN/player.
-    - Maka output HLS akan berada di folder turunan dari `<objectKey>` dengan nama leaf yang sudah dinormalisasi, misalnya `Kira/Test/My_Video/index.m3u8` dan `Kira/Test/My_Video/My_Video_00001.ts` dst.
+    - Maka output HLS akan berada di folder turunan dari `<objectKey>` dengan nama leaf yang sudah dinormalisasi, misalnya `Kira/Test/My_Video/index.m3u8`, `Kira/Test/My_Video/My_Video_init.mp4`, dan `Kira/Test/My_Video/My_Video_00001.m4s` dst.
     - Artinya: folder/prefix dari `prefix` + `relativePath` tetap dipakai.
 
 - **Field `relativePath` / `filePath` / `path`** (opsional, per file)
@@ -87,7 +87,8 @@ Backend membentuk object key seperti:
 Jika `encode=1`, maka output HLS untuk contoh di atas akan menjadi:
 
 - Playlist: `Nanti Conto/720p/eps1/index.m3u8`
-- Segmen: `Nanti Conto/720p/eps1/eps1_00001.ts`, `.../eps1_00002.ts`, dst.
+- Init segment: `Nanti Conto/720p/eps1/eps1_init.mp4`
+- Media segment: `Nanti Conto/720p/eps1/eps1_00001.m4s`, `.../eps1_00002.m4s`, dst.
 
 Jika nama file asli mengandung karakter yang tidak aman untuk URL/CDN, nama folder HLS dan nama segmen hasil encode akan memakai bentuk yang sudah dinormalisasi.
 
@@ -106,7 +107,7 @@ Artinya untuk kasus `encode=1`, response JSON biasanya baru diterima FE setelah 
 
 1. body upload selesai diterima backend
 2. encode / packaging HLS selesai
-3. file output HLS (`index.m3u8` dan `.ts`) selesai diupload ke B2
+3. file output HLS (`index.m3u8`, init `.mp4`, dan `.m4s`) selesai diupload ke B2
 
 Jadi benar: pada flow ini request upload tidak langsung selesai saat file pertama selesai terkirim dari FE.
 Request baru selesai setelah pekerjaan pada request tersebut selesai diproses backend.
@@ -274,7 +275,8 @@ curl -X POST "http://localhost:PORT/b2/upload-folder-multipart" \
 Hasil output HLS akan berada di:
 
 - `test/720p/eps1/index.m3u8`
-- `test/720p/eps1/eps1_00001.ts` dst.
+- `test/720p/eps1/eps1_init.mp4`
+- `test/720p/eps1/eps1_00001.m4s` dst.
 ```
 
 ### cURL (fallback, path lewat filename)

@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { PassThrough, Readable } from 'stream';
+import pLimit from 'p-limit';
 import { uploadFromStream, getB2UploadUrl } from '../lib/b2.js';
 import { createPresignedPutUrl } from '../lib/s3.js';
 import { upsertFolder, getFolderByPrefix, upsertFile } from '../lib/storageCatalogDb.js';
@@ -299,17 +300,39 @@ function buildHlsOutputPrefix({ objectKey }) {
   return parentDir && parentDir !== '.' ? `${parentDir}/${safeLeaf}/` : `${safeLeaf}/`;
 }
 
-async function packageToHls({ inputPath, outDir, baseName, ffmpegPath, threads = 4, onProgress }) {
-  fs.mkdirSync(outDir, { recursive: true });
+function getHlsThreadsNumber() {
+  const n = Number(process.env.HLS_THREADS || 4);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 8) : 4;
+}
+
+function getHlsUploadConcurrency() {
+  const n = Number(process.env.HLS_UPLOAD_CONCURRENCY || 6);
+  if (!Number.isFinite(n) || n <= 0) return 6;
+  return Math.min(Math.trunc(n), 16);
+}
+
+function getFolderUploadConcurrency() {
+  const n = Number(process.env.FOLDER_UPLOAD_CONCURRENCY || process.env.HLS_UPLOAD_CONCURRENCY || 6);
+  if (!Number.isFinite(n) || n <= 0) return 6;
+  return Math.min(Math.trunc(n), 16);
+}
+
+function buildHlsPackageConfig({ outDir, baseName }) {
   const playlistName = 'index.m3u8';
   const playlistPath = path.join(outDir, playlistName);
-  const safeBaseName = buildSafeHlsName(baseName);
-  const segmentPattern = path.join(outDir, `${safeBaseName}_%05d.ts`);
+  const stem = String(baseName || '').replace(/\.[^/.]+$/, '') || 'video';
+  const safeBaseName = buildSafeHlsName(stem, 'video');
+  const initFileName = `${safeBaseName}_init.mp4`;
+  const segmentPattern = path.join(outDir, `${safeBaseName}_%05d.m4s`);
+  return { playlistName, playlistPath, initFileName, segmentPattern };
+}
 
-  const args = [
+function buildHlsFfmpegArgs({ inputPath, outDir, baseName, threads = 4, usePipeInput = false }) {
+  const { playlistPath, initFileName, segmentPattern } = buildHlsPackageConfig({ outDir, baseName });
+  return [
     '-y',
     '-i',
-    inputPath,
+    usePipeInput ? 'pipe:0' : inputPath,
     '-map',
     '0:v:0?',
     '-map',
@@ -324,12 +347,314 @@ async function packageToHls({ inputPath, outDir, baseName, ffmpegPath, threads =
     '6',
     '-hls_list_size',
     '0',
+    '-hls_segment_type',
+    'fmp4',
+    '-hls_fmp4_init_filename',
+    initFileName,
     '-hls_segment_filename',
     segmentPattern,
     '-threads',
     String(threads),
     playlistPath,
   ];
+}
+
+function getHlsOutputContentType(fileName) {
+  if (fileName.endsWith('.m3u8')) return 'application/vnd.apple.mpegurl';
+  if (fileName.endsWith('.m4s')) return 'video/iso.segment';
+  if (fileName.endsWith('.mp4')) return 'video/mp4';
+  return 'application/octet-stream';
+}
+
+function sortHlsOutputFiles(files) {
+  return [...files].sort((a, b) => {
+    const aPlaylist = a === 'index.m3u8' ? 1 : 0;
+    const bPlaylist = b === 'index.m3u8' ? 1 : 0;
+    if (aPlaylist !== bPlaylist) return aPlaylist - bPlaylist;
+    return a.localeCompare(b);
+  });
+}
+
+function resolveHlsArtifactPath({ dirPath, uri }) {
+  const raw = String(uri || '').trim();
+  if (!raw) return null;
+
+  const candidates = [];
+  if (path.isAbsolute(raw)) {
+    candidates.push(raw);
+  } else {
+    candidates.push(path.join(dirPath, raw));
+    candidates.push(path.join(process.cwd(), raw));
+    candidates.push(path.join(process.cwd(), path.basename(raw)));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (candidate && fs.existsSync(candidate)) return candidate;
+    } catch {
+    }
+  }
+  return null;
+}
+
+function prepareHlsArtifacts({ dirPath, playlistName = 'index.m3u8' }) {
+  const playlistPath = path.join(dirPath, playlistName);
+  const playlistText = fs.readFileSync(playlistPath, 'utf8');
+  const lines = playlistText.split(/\r?\n/);
+  const refs = [];
+  const seen = new Set();
+
+  const addRef = (uri) => {
+    const raw = String(uri || '').trim();
+    if (!raw || /^https?:\/\//i.test(raw)) return;
+    if (seen.has(raw)) return;
+    seen.add(raw);
+    refs.push(raw);
+  };
+
+  for (const line of lines) {
+    const mapMatch = /^#EXT-X-MAP:.*URI="([^"]+)"/i.exec(line.trim());
+    if (mapMatch?.[1]) addRef(mapMatch[1]);
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    addRef(trimmed);
+  }
+
+  const replacements = new Map();
+  const artifacts = [];
+  for (const ref of refs) {
+    const sourcePath = resolveHlsArtifactPath({ dirPath, uri: ref });
+    const fileName = path.basename(ref);
+    replacements.set(ref, fileName);
+    artifacts.push({ ref, fileName, sourcePath });
+  }
+
+  const rewrittenLines = lines.map((line) => {
+    const trimmed = line.trim();
+    const mapMatch = /^#EXT-X-MAP:(.*)URI="([^"]+)"(.*)$/i.exec(line);
+    if (mapMatch?.[2]) {
+      const nextUri = replacements.get(mapMatch[2]) || path.basename(mapMatch[2]);
+      return `${line.slice(0, mapMatch.index)}#EXT-X-MAP:${mapMatch[1]}URI="${nextUri}"${mapMatch[3]}`;
+    }
+    if (!trimmed || trimmed.startsWith('#')) return line;
+    return replacements.get(trimmed) || path.basename(trimmed);
+  });
+
+  fs.writeFileSync(playlistPath, rewrittenLines.join('\n'));
+
+  return {
+    playlistPath,
+    playlistTextBeforeRewrite: playlistText,
+    artifacts,
+  };
+}
+
+function validateHlsOutputs({ dirPath, playlistName = 'index.m3u8' }) {
+  const playlistPath = path.join(dirPath, playlistName);
+  const text = fs.readFileSync(playlistPath, 'utf8');
+  const lines = text.split(/\r?\n/);
+  const mediaLines = lines.map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+  const targetMatch = /#EXT-X-TARGETDURATION:(\d+)/i.exec(text);
+  const targetDuration = Number(targetMatch?.[1] || NaN);
+  const extInfMatches = Array.from(text.matchAll(/#EXTINF:([0-9.]+)/gi));
+  const durations = extInfMatches.map((m) => Number(m?.[1] || NaN)).filter((n) => Number.isFinite(n));
+  const mapMatch = /#EXT-X-MAP:.*URI="([^"]+)"/i.exec(text);
+  const mapUri = mapMatch?.[1] || null;
+
+  if (!mediaLines.length) {
+    throw new Error('Generated HLS playlist has no media segments');
+  }
+  if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+    throw new Error(`Generated HLS playlist has invalid TARGETDURATION: ${targetMatch?.[1] || 'missing'}`);
+  }
+  if (durations.length && durations.every((n) => n <= 0)) {
+    throw new Error('Generated HLS playlist has only zero-duration segments');
+  }
+  if (!mapUri) {
+    throw new Error('Generated fMP4 HLS playlist is missing EXT-X-MAP');
+  }
+  const initPath = resolveHlsArtifactPath({ dirPath, uri: mapUri });
+  if (!initPath) {
+    throw new Error(`Generated HLS init segment not found: ${mapUri}`);
+  }
+}
+
+async function streamToTempInputFile({ inputStream, outputPath, jobId, request, label, totalBytes }) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  return new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(outputPath);
+    const total = Number(totalBytes);
+    const hasTotal = Number.isFinite(total) && total > 0;
+    let written = 0;
+    let lastLogAt = 0;
+    let settled = false;
+    const log = request?.log;
+    const unregister = registerKill(jobId, () => {
+      try {
+        inputStream.destroy(new Error('Job cancelled'));
+      } catch {
+      }
+      try {
+        ws.destroy(new Error('Job cancelled'));
+      } catch {
+      }
+    });
+
+    const cleanup = () => {
+      try {
+        unregister();
+      } catch {
+      }
+      try {
+        inputStream.off('data', onData);
+        inputStream.off('error', onError);
+      } catch {
+      }
+      try {
+        ws.off('error', onError);
+        ws.off('finish', onFinish);
+      } catch {
+      }
+    };
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (err) return reject(err);
+      return resolve({ outputPath, size: written });
+    };
+
+    const onData = (chunk) => {
+      written += chunk?.length || 0;
+      const now = Date.now();
+      if (now - lastLogAt < 3000) return;
+      lastLogAt = now;
+      try {
+        log?.info(
+          {
+            label,
+            tempInputPath: outputPath,
+            bufferedBytes: written,
+            totalBytes: hasTotal ? total : null,
+            percent: hasTotal ? Math.floor((written / total) * 100) : null,
+          },
+          'Buffering input for HLS',
+        );
+      } catch {
+      }
+    };
+
+    const onError = (err) => finish(err);
+    const onFinish = () => finish();
+
+    inputStream.on('data', onData);
+    inputStream.on('error', onError);
+    ws.on('error', onError);
+    ws.on('finish', onFinish);
+    inputStream.pipe(ws);
+  });
+}
+
+async function uploadHlsOutputsToB2({ request, dirPath, hlsPrefix, folderId, jobId, objectKey }) {
+  const prepared = prepareHlsArtifacts({ dirPath, playlistName: 'index.m3u8' });
+  const artifactFiles = prepared.artifacts.filter((item) => item?.fileName);
+  const outFiles = sortHlsOutputFiles([...artifactFiles.map((item) => item.fileName), 'index.m3u8']);
+  const artifactMap = new Map(artifactFiles.map((item) => [item.fileName, item.sourcePath]));
+  const totalOut = outFiles.length;
+  const concurrency = getHlsUploadConcurrency();
+  const limit = pLimit(concurrency);
+  let doneOut = 0;
+
+  try {
+    request?.log?.info(
+      {
+        jobId,
+        objectKey,
+        hlsPrefix,
+        totalOut,
+        concurrency,
+        outFiles,
+        playlistPreview: prepared.playlistTextBeforeRewrite.slice(0, 1200),
+      },
+      'HLS output ready, start upload',
+    );
+  } catch {
+  }
+
+  const uploadOne = async (f) => {
+    if (isCancelled(jobId)) throw new Error('Job cancelled');
+    const full = f === 'index.m3u8' ? prepared.playlistPath : artifactMap.get(f);
+    if (!full || !fs.existsSync(full)) {
+      throw new Error(`Missing HLS artifact file: ${f}`);
+    }
+    const fileSize = (() => {
+      try {
+        return fs.statSync(full)?.size || 0;
+      } catch {
+        return 0;
+      }
+    })();
+    const key = `${hlsPrefix}${f}`;
+    const ct = getHlsOutputContentType(f);
+    const startedAt = Date.now();
+
+    try {
+      request?.log?.info(
+        { jobId, objectKey, outKey: key, outFile: f, outSize: fileSize, outContentType: ct, outIndex: doneOut + 1, outTotal: totalOut },
+        'HLS upload start',
+      );
+    } catch {
+    }
+
+    const stream = fs.createReadStream(full);
+    await uploadFromStream({ fileName: key, stream, contentType: ct, expectedSizeBytes: fileSize });
+
+    try {
+      request?.log?.info(
+        { jobId, objectKey, outKey: key, outFile: f, outSize: fileSize, durationMs: Date.now() - startedAt, outIndex: doneOut + 1, outTotal: totalOut },
+        'HLS upload finished',
+      );
+    } catch {
+    }
+
+    try {
+      fs.rmSync(full, { force: true });
+    } catch {
+    }
+
+    doneOut += 1;
+    const pct = 50 + Math.round((doneOut / Math.max(1, totalOut)) * 50);
+    updateJobThrottled(jobId, { status: 'uploading', current: key, percent: Math.min(99, pct) });
+
+    upsertFile({
+      folderId,
+      fileName: f,
+      filePath: key,
+      size: fileSize,
+      contentType: ct,
+      uploadedAt: new Date().toISOString(),
+    });
+  };
+
+  const mediaFiles = outFiles.filter((f) => f !== 'index.m3u8');
+  const playlistFile = outFiles.find((f) => f === 'index.m3u8');
+
+  await Promise.all(mediaFiles.map((f) => limit(() => uploadOne(f))));
+  if (playlistFile) {
+    await uploadOne(playlistFile);
+  }
+
+  return { totalOut };
+}
+
+async function packageToHls({ inputPath, outDir, baseName, ffmpegPath, threads = 4, onProgress }) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const { playlistName, playlistPath } = buildHlsPackageConfig({ outDir, baseName });
+  const args = buildHlsFfmpegArgs({ inputPath, outDir, baseName, threads, usePipeInput: false });
 
   await runFfmpeg(ffmpegPath, args, (sec) => {
     try {
@@ -627,7 +952,7 @@ export async function importB2ByUrlController(request, reply) {
     }
 
     if (encode) {
-      updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 0 });
+      updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
       const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
@@ -644,129 +969,37 @@ export async function importB2ByUrlController(request, reply) {
 
         const hlsOutDir = path.join(tmpDir, 'out');
         const hlsPrefix = buildHlsOutputPrefix({ objectKey });
+        const tempInputPath = path.join(tmpDir, `input${path.extname(baseName) || '.bin'}`);
 
         try {
           request.log.info({ jobId, objectKey, hlsPrefix, sourceUrl: url.toString() }, 'HLS encode start (import-by-url)');
         } catch {
         }
 
-        updateEncodeJobProgress(jobId, { current: objectKey, seconds: 0 });
-
-        await new Promise((resolve, reject) => {
-          const base = buildSafeHlsName(baseName.replace(/\.[^/.]+$/, '') || 'video');
-          const playlistPath = path.join(hlsOutDir, 'index.m3u8');
-          fs.mkdirSync(hlsOutDir, { recursive: true });
-          const segmentPattern = path.join(hlsOutDir, `${base}_%05d.ts`);
-          const args = [
-            '-y',
-            '-i',
-            'pipe:0',
-            '-map',
-            '0:v:0?',
-            '-map',
-            '0:a:0?',
-            '-sn',
-            '-dn',
-            '-c',
-            'copy',
-            '-f',
-            'hls',
-            '-hls_time',
-            '6',
-            '-hls_list_size',
-            '0',
-            '-hls_segment_filename',
-            segmentPattern,
-            '-threads',
-            String(Number(process.env.HLS_THREADS || 4) || 4),
-            playlistPath,
-          ];
-
-          const p = spawn(ffmpegPath, args);
-          const unregister = registerKill(jobId, () => {
-            try {
-              p.kill('SIGKILL');
-            } catch {
-            }
-          });
-
-          let stderr = '';
-          p.stderr.on('data', (d) => {
-            const s = d.toString();
-            stderr += s;
-            const sec = parseFfmpegProgressSec(s);
-            if (Number.isFinite(sec)) {
-              updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec });
-            }
-            if (isCancelled(jobId)) {
-              try {
-                p.kill('SIGKILL');
-              } catch {
-              }
-            }
-          });
-
-          inputStream.pipe(p.stdin);
-
-          p.on('close', (code) => {
-            try {
-              unregister();
-            } catch {
-            }
-            if (isCancelled(jobId)) return reject(new Error('Job cancelled'));
-            if (code === 0) return resolve();
-            reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(0, 4000)}`));
-          });
-          p.on('error', (e) => {
-            try {
-              unregister();
-            } catch {
-            }
-            reject(e);
-          });
+        await streamToTempInputFile({
+          inputStream,
+          outputPath: tempInputPath,
+          jobId,
+          request,
+          label: `hls-buffer:${objectKey}`,
+          totalBytes: declaredSize,
         });
+
+        updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
+        await packageToHls({
+          inputPath: tempInputPath,
+          outDir: hlsOutDir,
+          baseName,
+          ffmpegPath,
+          threads: getHlsThreadsNumber(),
+          onProgress: (sec) => updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec, pctMin: 5, pctMax: 49 }),
+        });
+        validateHlsOutputs({ dirPath: hlsOutDir, playlistName: 'index.m3u8' });
 
         updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
 
-        const outFiles = fs.readdirSync(hlsOutDir).filter(Boolean);
-        const totalOut = outFiles.length;
-        let doneOut = 0;
         const folderId = await ensureFolderHierarchy(hlsPrefix);
-
-        for (const f of outFiles) {
-          if (isCancelled(jobId)) throw new Error('Job cancelled');
-          const full = path.join(hlsOutDir, f);
-          const fileSize = (() => {
-            try {
-              return fs.statSync(full)?.size || 0;
-            } catch {
-              return 0;
-            }
-          })();
-          const stream = fs.createReadStream(full);
-          const key = `${hlsPrefix}${f}`;
-          const ct = f.endsWith('.m3u8')
-            ? 'application/vnd.apple.mpegurl'
-            : f.endsWith('.ts')
-              ? 'video/MP2T'
-              : 'application/octet-stream';
-          await uploadFromStream({ fileName: key, stream, contentType: ct, expectedSizeBytes: fileSize });
-          try {
-            fs.rmSync(full, { force: true });
-          } catch {
-          }
-          doneOut += 1;
-          const pct = 50 + Math.round((doneOut / Math.max(1, totalOut)) * 50);
-          updateJobThrottled(jobId, { status: 'uploading', current: key, percent: Math.min(99, pct) });
-          upsertFile({
-            folderId,
-            fileName: f,
-            filePath: key,
-            size: fileSize,
-            contentType: ct,
-            uploadedAt: new Date().toISOString(),
-          });
-        }
+        await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
 
         files.push({
           id: `${hlsPrefix}index.m3u8`,
@@ -968,130 +1201,38 @@ export async function directUploadPutController(request, reply) {
 
         const hlsOutDir = path.join(tmpDir, 'out');
         const hlsPrefix = buildHlsOutputPrefix({ objectKey });
+        const tempInputPath = path.join(tmpDir, `input${path.extname(baseName) || '.bin'}`);
 
         try {
           request.log.info({ jobId, objectKey, hlsPrefix }, 'HLS encode start (direct)');
         } catch {
         }
 
-        updateEncodeJobProgress(jobId, { current: objectKey, seconds: 0 });
-
-        await new Promise((resolve, reject) => {
-          const base = buildSafeHlsName(baseName.replace(/\.[^/.]+$/, '') || 'video');
-          const playlistPath = path.join(hlsOutDir, 'index.m3u8');
-          fs.mkdirSync(hlsOutDir, { recursive: true });
-          const segmentPattern = path.join(hlsOutDir, `${base}_%05d.ts`);
-          const args = [
-            '-y',
-            '-i',
-            'pipe:0',
-            '-map',
-            '0:v:0?',
-            '-map',
-            '0:a:0?',
-            '-sn',
-            '-dn',
-            '-c',
-            'copy',
-            '-f',
-            'hls',
-            '-hls_time',
-            '6',
-            '-hls_list_size',
-            '0',
-            '-hls_segment_filename',
-            segmentPattern,
-            '-threads',
-            String(Number(process.env.HLS_THREADS || 4) || 4),
-            playlistPath,
-          ];
-
-          const p = spawn(ffmpegPath, args);
-          const unregister = registerKill(jobId, () => {
-            try {
-              p.kill('SIGKILL');
-            } catch {
-            }
-          });
-
-          let stderr = '';
-          p.stderr.on('data', (d) => {
-            const s = d.toString();
-            stderr += s;
-            const sec = parseFfmpegProgressSec(s);
-            if (Number.isFinite(sec)) {
-              updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec });
-            }
-            if (isCancelled(jobId)) {
-              try {
-                p.kill('SIGKILL');
-              } catch {
-              }
-            }
-          });
-
-          inputStream.pipe(p.stdin);
-
-          p.on('close', (code) => {
-            try {
-              unregister();
-            } catch {
-            }
-            if (isCancelled(jobId)) return reject(new Error('Job cancelled'));
-            if (code === 0) return resolve();
-            reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(0, 4000)}`));
-          });
-          p.on('error', (e) => {
-            try {
-              unregister();
-            } catch {
-            }
-            reject(e);
-          });
+        updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
+        await streamToTempInputFile({
+          inputStream,
+          outputPath: tempInputPath,
+          jobId,
+          request,
+          label: `hls-buffer:${objectKey}`,
+          totalBytes: declaredSize,
         });
+
+        updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
+        await packageToHls({
+          inputPath: tempInputPath,
+          outDir: hlsOutDir,
+          baseName,
+          ffmpegPath,
+          threads: getHlsThreadsNumber(),
+          onProgress: (sec) => updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec, pctMin: 5, pctMax: 49 }),
+        });
+        validateHlsOutputs({ dirPath: hlsOutDir, playlistName: 'index.m3u8' });
 
         updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
 
-        const outFiles = fs.readdirSync(hlsOutDir).filter(Boolean);
-        const totalOut = outFiles.length;
-        let doneOut = 0;
-
         const folderId = await ensureFolderHierarchy(hlsPrefix);
-
-        for (const f of outFiles) {
-          if (isCancelled(jobId)) throw new Error('Job cancelled');
-          const full = path.join(hlsOutDir, f);
-          const fileSize = (() => {
-            try {
-              return fs.statSync(full)?.size || 0;
-            } catch {
-              return 0;
-            }
-          })();
-          const stream = fs.createReadStream(full);
-          const key = `${hlsPrefix}${f}`;
-          const ct = f.endsWith('.m3u8')
-            ? 'application/vnd.apple.mpegurl'
-            : f.endsWith('.ts')
-              ? 'video/MP2T'
-              : 'application/octet-stream';
-          await uploadFromStream({ fileName: key, stream, contentType: ct, expectedSizeBytes: fileSize });
-          try {
-            fs.rmSync(full, { force: true });
-          } catch {
-          }
-          doneOut += 1;
-          const pct = 50 + Math.round((doneOut / Math.max(1, totalOut)) * 50);
-          updateJobThrottled(jobId, { status: 'uploading', current: key, percent: Math.min(99, pct) });
-          upsertFile({
-            folderId,
-            fileName: f,
-            filePath: key,
-            size: fileSize,
-            contentType: ct,
-            uploadedAt: new Date().toISOString(),
-          });
-        }
+        await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
 
         files.push({
           id: `${hlsPrefix}index.m3u8`,
@@ -1188,7 +1329,13 @@ export async function commitB2UploadController(request, reply) {
     const errors = [];
 
     for (const f of inputFiles) {
-      const { filePath, fileName, prefix, size, contentType, uploadedAt } = f || {};
+      const ff = f || {};
+      const filePath = ff.filePath ?? ff.path ?? ff.relativePath ?? ff.id;
+      const fileName = ff.fileName ?? ff.filename ?? ff.name;
+      const prefix = ff.prefix;
+      const size = ff.size ?? ff.fileSize;
+      const contentType = ff.contentType ?? ff.mimeType;
+      const uploadedAt = ff.uploadedAt ?? ff.modifiedTime;
 
       const norm = normalizeFilePathAndName({ filePath, fileName, prefix });
       const objectKey = norm.objectKey;
@@ -1196,12 +1343,30 @@ export async function commitB2UploadController(request, reply) {
       const folderPrefix = norm.folderPrefix;
 
       if (!objectKey || !baseName) {
-        errors.push({ filePath: filePath || null, fileName: fileName || null, error: 'Missing filePath or fileName' });
+        errors.push({
+          filePath: filePath || null,
+          fileName: fileName || null,
+          error: 'Missing filePath or (prefix + fileName)',
+        });
+        continue;
+      }
+
+      let folderId;
+      try {
+        folderId = await ensureFolderHierarchy(folderPrefix);
+      } catch (e) {
+        errors.push({
+          fileName: baseName,
+          objectKey,
+          stage: 'ensureFolderHierarchy',
+          error: e?.message || 'Commit failed',
+          code: e?.code || null,
+          name: e?.name || null,
+        });
         continue;
       }
 
       try {
-        const folderId = await ensureFolderHierarchy(folderPrefix);
         upsertFile({
           folderId,
           fileName: baseName,
@@ -1210,17 +1375,25 @@ export async function commitB2UploadController(request, reply) {
           contentType: contentType || 'application/octet-stream',
           uploadedAt: uploadedAt || null,
         });
-
-        files.push({
-          id: objectKey,
-          name: baseName,
-          mimeType: contentType || 'application/octet-stream',
-          size: Number(size) || 0,
-          modifiedTime: uploadedAt || null,
-        });
       } catch (e) {
-        errors.push({ fileName: baseName, objectKey, error: e?.message || 'Commit failed' });
+        errors.push({
+          fileName: baseName,
+          objectKey,
+          stage: 'upsertFile',
+          error: e?.message || 'Commit failed',
+          code: e?.code || null,
+          name: e?.name || null,
+        });
+        continue;
       }
+
+      files.push({
+        id: objectKey,
+        name: baseName,
+        mimeType: contentType || 'application/octet-stream',
+        size: Number(size) || 0,
+        modifiedTime: uploadedAt || null,
+      });
     }
 
     if (jobId) {
@@ -1488,10 +1661,16 @@ async function getFfmpegPath() {
   return 'ffmpeg';
 }
 
-function runFfmpeg(ffmpegPath, args, onTime) {
+function runFfmpeg(ffmpegPath, args, onTime, options = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(ffmpegPath, args);
+    const p = spawn(ffmpegPath, args, options?.cwd ? { cwd: options.cwd } : undefined);
     let stderr = '';
+    const unregister = registerKill(options?.jobId, () => {
+      try {
+        p.kill('SIGKILL');
+      } catch {
+      }
+    });
     p.stderr.on('data', (d) => {
       const s = d.toString();
       stderr += s;
@@ -1515,11 +1694,21 @@ function runFfmpeg(ffmpegPath, args, onTime) {
       }
     });
     p.on('close', (code) => {
+      try {
+        unregister();
+      } catch {
+      }
       if (code === 0) return resolve();
       const err = new Error(`ffmpeg exited with code ${code}: ${stderr.slice(0, 4000)}`);
       reject(err);
     });
-    p.on('error', (e) => reject(e));
+    p.on('error', (e) => {
+      try {
+        unregister();
+      } catch {
+      }
+      reject(e);
+    });
   });
 }
 
@@ -1920,11 +2109,124 @@ export async function uploadB2AndCatalogController(request, reply) {
   }
 }
 
+async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
+  const { objectKey, baseName, folderPrefix, declaredSize, wantEncode, fileType, tempInputPath } = entry;
+
+  try {
+    updateJobThrottled(jobId, { status: wantEncode ? 'encoding' : 'uploading', current: objectKey });
+
+    if (isCancelled(jobId)) {
+      throw new Error('Job cancelled');
+    }
+
+    if (wantEncode) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+      const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
+        removeDirSafe(tmpDir);
+      });
+      try {
+        const ffmpegPath = await getFfmpegPath();
+        const ffmpegOk = await checkBinary(ffmpegPath);
+        if (!ffmpegOk) {
+          throw new Error(
+            `ffmpeg not found or not executable at ${ffmpegPath}. Install system ffmpeg or set FFMPEG_PATH/.env, or install ffmpeg-static.`,
+          );
+        }
+
+        const hlsOutDir = path.join(tmpDir, 'out');
+        const hlsPrefix = buildHlsOutputPrefix({ objectKey });
+
+        try {
+          request.log.info({ jobId, objectKey, hlsPrefix }, 'HLS encode start');
+        } catch {
+        }
+
+        updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
+        await packageToHls({
+          inputPath: tempInputPath,
+          outDir: hlsOutDir,
+          baseName,
+          ffmpegPath,
+          threads: getHlsThreadsNumber(),
+          onProgress: (sec) => updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec, pctMin: 5, pctMax: 49 }),
+        });
+        validateHlsOutputs({ dirPath: hlsOutDir, playlistName: 'index.m3u8' });
+
+        updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
+
+        const folderId = await ensureFolderHierarchy(hlsPrefix);
+        await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
+
+        return {
+          id: `${hlsPrefix}index.m3u8`,
+          name: 'index.m3u8',
+          mimeType: 'application/vnd.apple.mpegurl',
+          size: 0,
+          modifiedTime: new Date().toISOString(),
+        };
+      } finally {
+        unregisterTmpCleanup();
+        removeDirSafe(tmpDir);
+      }
+    }
+
+    const logger = startUploadProgressLogger({ request, label: `b2-upload-folder:${objectKey}`, totalBytes: declaredSize });
+    const readStream = fs.createReadStream(tempInputPath);
+    readStream.pipe(logger.passthrough);
+    let uploadRes;
+    try {
+      uploadRes = await uploadFromStream({
+        fileName: objectKey,
+        stream: logger.passthrough,
+        contentType: fileType,
+        expectedSizeBytes: declaredSize,
+      });
+      try {
+        request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'B2 folder upload finished');
+      } catch {
+      }
+    } finally {
+      logger.cleanup();
+    }
+
+    const folderId = await ensureFolderHierarchy(folderPrefix);
+
+    const size = Number(uploadRes?.contentLength) || 0;
+    const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
+    const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
+
+    upsertFile({
+      folderId,
+      fileName: baseName,
+      filePath: objectKey,
+      size,
+      contentType,
+      uploadedAt,
+    });
+
+    return {
+      id: objectKey,
+      name: baseName,
+      mimeType: contentType,
+      size,
+      modifiedTime: uploadedAt || null,
+    };
+  } finally {
+    try {
+      fs.rmSync(tempInputPath, { force: true });
+    } catch {
+    }
+  }
+}
+
 export async function uploadB2FolderMultipartController(request, reply) {
   let jobId = null;
+  let stagedRootDir = null;
+  let unregisterStageCleanup = null;
   try {
     const files = [];
     const errors = [];
+    const stagedEntries = [];
 
     let sawAnyFilePart = false;
     let prefixCleaned = cleanRelativePath(request.query?.prefix ?? request.query?.pathPrefix ?? request.query?.basePrefix);
@@ -1964,12 +2266,17 @@ export async function uploadB2FolderMultipartController(request, reply) {
     jobId = resolveRequestedJobId(request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
     upsertJob({ id: jobId, prefix: null, status: 'receiving', current: null, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
+    stagedRootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'folder-upload-'));
+    unregisterStageCleanup = registerJobCleanup(jobId, () => {
+      removeDirSafe(stagedRootDir);
+    });
 
     if (prefixCleaned) {
       updateJobThrottled(jobId, { prefix: prefixCleaned || null });
     }
 
     const parts = request.parts();
+    let stagedIndex = 0;
     for await (const part of parts) {
       if (part?.type === 'field') {
         const fieldname = String(part.fieldname || '');
@@ -2001,6 +2308,10 @@ export async function uploadB2FolderMultipartController(request, reply) {
       const fileStream = part.file;
 
       if (!fileNameRaw || !fileStream) {
+        try {
+          fileStream?.resume?.();
+        } catch {
+        }
         errors.push({ fileName: fileNameRaw || null, error: 'Malformed file part (missing filename or stream)' });
         continue;
       }
@@ -2018,6 +2329,10 @@ export async function uploadB2FolderMultipartController(request, reply) {
       const isVideo = lowerMime.startsWith('video/') || videoExt.includes(ext);
 
       if (!isVideo) {
+        try {
+          fileStream.resume();
+        } catch {
+        }
         errors.push({ fileName: fileNameFromPath, error: 'Only video files are allowed for this endpoint' });
         continue;
       }
@@ -2072,322 +2387,44 @@ export async function uploadB2FolderMultipartController(request, reply) {
       );
 
       if (!objectKey || !baseName) {
+        try {
+          fileStream.resume();
+        } catch {
+        }
         errors.push({ fileName: effectiveFileName, relativePath: relativePathCleaned || null, error: 'Missing objectKey after normalization' });
         continue;
       }
 
       try {
-        updateJobThrottled(jobId, { status: wantEncode ? 'encoding' : 'uploading', current: objectKey });
-
         if (isCancelled(jobId)) {
           throw new Error('Job cancelled');
         }
+        updateJobThrottled(jobId, { status: 'receiving', current: objectKey });
 
-        if (wantEncode) {
-          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
-          const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
-            removeDirSafe(tmpDir);
-          });
-          try {
-            const ffmpegPath = await getFfmpegPath();
-            const ffmpegOk = await checkBinary(ffmpegPath);
-            if (!ffmpegOk) {
-              throw new Error(
-                `ffmpeg not found or not executable at ${ffmpegPath}. Install system ffmpeg or set FFMPEG_PATH/.env, or install ffmpeg-static.`,
-              );
-            }
+        const tempInputPath = path.join(
+          stagedRootDir,
+          `${String(stagedIndex).padStart(5, '0')}_${Date.now()}${path.extname(baseName) || '.bin'}`,
+        );
+        stagedIndex += 1;
 
-            const hlsOutDir = path.join(tmpDir, 'out');
-            const hlsPrefix = buildHlsOutputPrefix({ objectKey });
-
-            try {
-              request.log.info({ jobId, objectKey, hlsPrefix }, 'HLS encode start');
-            } catch {
-            }
-
-            updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 0 });
-            updateEncodeJobProgress(jobId, { current: objectKey, seconds: 0 });
-
-            if (isCancelled(jobId)) {
-              throw new Error('Job cancelled');
-            }
-
-            await new Promise((resolve, reject) => {
-              const base = buildSafeHlsName(baseName.replace(/\.[^/.]+$/, '') || 'video');
-              const playlistPath = path.join(hlsOutDir, 'index.m3u8');
-              fs.mkdirSync(hlsOutDir, { recursive: true });
-              const segmentPattern = path.join(hlsOutDir, `${base}_%05d.ts`);
-              const args = [
-                '-y',
-                '-i',
-                'pipe:0',
-                '-map',
-                '0:v:0?',
-                '-map',
-                '0:a:0?',
-                '-sn',
-                '-dn',
-                '-c',
-                'copy',
-                '-f',
-                'hls',
-                '-hls_time',
-                '6',
-                '-hls_list_size',
-                '0',
-                '-hls_segment_filename',
-                segmentPattern,
-                '-threads',
-                String(Number(process.env.HLS_THREADS || 4) || 4),
-                playlistPath,
-              ];
-
-              try {
-                request.log.info({ jobId, objectKey, ffmpegPath, args }, 'ffmpeg start (HLS)');
-              } catch {
-              }
-
-              const p = spawn(ffmpegPath, args);
-
-              try {
-                request.log.info({ jobId, pid: p.pid, objectKey }, 'ffmpeg spawned');
-              } catch {
-              }
-
-              try {
-                fileStream.pipe(p.stdin);
-              } catch {
-              }
-
-              try {
-                request.log.info({ jobId, objectKey }, 'ffmpeg stdin piping started');
-              } catch {
-              }
-
-              try {
-                fileStream.on('error', (e) => {
-                  try {
-                    p.kill('SIGKILL');
-                  } catch {
-                  }
-                  reject(e);
-                });
-              } catch {
-              }
-
-              try {
-                p.stdin.on('error', () => {});
-              } catch {
-              }
-
-              const unregister = registerKill(jobId, () => {
-                try {
-                  p.kill('SIGKILL');
-                } catch {
-                }
-              });
-
-              let stderr = '';
-              let lastProgressLogAt = 0;
-              let lastTimeStr = null;
-              p.stderr.on('data', (d) => {
-                stderr += d.toString();
-                const s = d.toString();
-                const m = /time=([0-9:.]+)/.exec(s);
-                if (m && m[1]) {
-                  lastTimeStr = m[1];
-                  const sec = parseDurationToSec(m[1]);
-                  if (Number.isFinite(sec)) {
-                    updateEncodeJobProgress(jobId, { current: objectKey, seconds: sec });
-                  }
-                  const now = Date.now();
-                  if (now - lastProgressLogAt >= 3000) {
-                    lastProgressLogAt = now;
-                    try {
-                      request.log.info({ jobId, objectKey, time: lastTimeStr }, 'ffmpeg progress (HLS)');
-                    } catch {
-                    }
-                  }
-                } else {
-                  const now = Date.now();
-                  if (now - lastProgressLogAt >= 8000) {
-                    lastProgressLogAt = now;
-                    const line = (s || '').trim();
-                    if (line) {
-                      try {
-                        request.log.debug({ jobId, objectKey, line: line.slice(0, 800) }, 'ffmpeg stderr (HLS)');
-                      } catch {
-                      }
-                    }
-                  }
-                }
-                if (isCancelled(jobId)) {
-                  try {
-                    p.kill('SIGKILL');
-                  } catch {
-                  }
-                }
-              });
-
-              p.on('close', (code) => {
-                try {
-                  unregister();
-                } catch {
-                }
-                if (isCancelled(jobId)) {
-                  return reject(new Error('Job cancelled'));
-                }
-                try {
-                  request.log.info({ jobId, objectKey, code }, 'ffmpeg finished');
-                } catch {
-                }
-                if (code === 0) return resolve();
-                try {
-                  request.log.error(
-                    { jobId, objectKey, code, stderrTail: stderr.slice(-4000), lastTime: lastTimeStr },
-                    'ffmpeg failed (HLS)',
-                  );
-                } catch {
-                }
-                reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(0, 4000)}`));
-              });
-
-              p.on('error', (e) => {
-                try {
-                  unregister();
-                } catch {
-                }
-                reject(e);
-              });
-            });
-
-            updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
-
-            const outFiles = fs.readdirSync(hlsOutDir).filter(Boolean);
-            const totalOut = outFiles.length;
-            let doneOut = 0;
-
-            try {
-              request.log.info({ jobId, objectKey, hlsPrefix, totalOut }, 'HLS output ready, start upload');
-            } catch {
-            }
-
-            const folderId = await ensureFolderHierarchy(hlsPrefix);
-
-            for (const f of outFiles) {
-              if (isCancelled(jobId)) {
-                throw new Error('Job cancelled');
-              }
-              const full = path.join(hlsOutDir, f);
-              const fileSize = (() => {
-                try {
-                  return fs.statSync(full)?.size || 0;
-                } catch {
-                  return 0;
-                }
-              })();
-              const stream = fs.createReadStream(full);
-              const key = `${hlsPrefix}${f}`;
-              const ct = f.endsWith('.m3u8')
-                ? 'application/vnd.apple.mpegurl'
-                : f.endsWith('.ts')
-                  ? 'video/MP2T'
-                  : 'application/octet-stream';
-
-              const segStartedAt = Date.now();
-              try {
-                request.log.info(
-                  { jobId, objectKey, outKey: key, outFile: f, outSize: fileSize, outContentType: ct, outIndex: doneOut + 1, outTotal: totalOut },
-                  'HLS upload start',
-                );
-              } catch {
-              }
-
-              await uploadFromStream({ fileName: key, stream, contentType: ct, expectedSizeBytes: fileSize });
-
-              const segDurationMs = Date.now() - segStartedAt;
-              try {
-                request.log.info(
-                  { jobId, objectKey, outKey: key, outFile: f, outSize: fileSize, durationMs: segDurationMs, outIndex: doneOut + 1, outTotal: totalOut },
-                  'HLS upload finished',
-                );
-              } catch {
-              }
-
-              try {
-                fs.rmSync(full, { force: true });
-              } catch {
-              }
-
-              doneOut += 1;
-              const pct = 50 + Math.round((doneOut / Math.max(1, totalOut)) * 50);
-              updateJobThrottled(jobId, { status: 'uploading', current: key, percent: Math.min(99, pct) });
-
-              upsertFile({
-                folderId,
-                fileName: f,
-                filePath: key,
-                size: fileSize,
-                contentType: ct,
-                uploadedAt: new Date().toISOString(),
-              });
-            }
-
-            files.push({
-              id: `${hlsPrefix}index.m3u8`,
-              name: 'index.m3u8',
-              mimeType: 'application/vnd.apple.mpegurl',
-              size: 0,
-              modifiedTime: new Date().toISOString(),
-            });
-          } finally {
-            unregisterTmpCleanup();
-            removeDirSafe(tmpDir);
-          }
-
-          continue;
-        }
-
-        const logger = startUploadProgressLogger({ request, label: `b2-upload-folder:${objectKey}`, totalBytes: declaredSize });
-        fileStream.pipe(logger.passthrough);
-        let uploadRes;
-        try {
-          uploadRes = await uploadFromStream({
-            fileName: objectKey,
-            stream: logger.passthrough,
-            contentType: fileType,
-            expectedSizeBytes: declaredSize,
-          });
-          try {
-            request.log.info({ objectKey, uploadedBytes: logger.getUploadedBytes() }, 'B2 folder upload finished');
-          } catch {
-            // ignore
-          }
-        } finally {
-          logger.cleanup();
-        }
-
-        const folderId = await ensureFolderHierarchy(folderPrefix);
-
-        const size = Number(uploadRes?.contentLength) || 0;
-        const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
-        const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
-
-        upsertFile({
-          folderId,
-          fileName: baseName,
-          filePath: objectKey,
-          size,
-          contentType,
-          uploadedAt,
+        await streamToTempInputFile({
+          inputStream: fileStream,
+          outputPath: tempInputPath,
+          jobId,
+          request,
+          label: `folder-stage:${objectKey}`,
+          totalBytes: declaredSize,
         });
 
-        files.push({
-          id: objectKey,
-          name: baseName,
-          mimeType: contentType,
-          size,
-          modifiedTime: uploadedAt || null,
+        stagedEntries.push({
+          objectKey,
+          baseName,
+          folderPrefix,
+          declaredSize,
+          wantEncode,
+          fileType,
+          tempInputPath,
+          sourceName: fileNameFromPath || fileNameRaw || null,
         });
       } catch (e) {
         const status = e?.status || e?.response?.status || e?.response?.data?.status;
@@ -2404,13 +2441,77 @@ export async function uploadB2FolderMultipartController(request, reply) {
       });
     }
 
-    if (files.length === 0 && errors.length) {
+    if (stagedEntries.length === 0 && errors.length) {
       return reply.code(400).send({ error: 'No valid files uploaded', errors });
     }
 
-    if (files.length === 0) {
+    if (stagedEntries.length === 0) {
       return reply.code(400).send({ error: 'No files uploaded' });
     }
+
+    const concurrency = stagedEntries.length > 1 ? getFolderUploadConcurrency() : 1;
+    const limit = pLimit(concurrency);
+    let completedEntries = 0;
+
+    try {
+      request.log.info({ jobId, totalEntries: stagedEntries.length, concurrency }, 'Start buffered folder processing');
+    } catch {
+    }
+
+    updateJobThrottled(jobId, {
+      status: 'processing',
+      current: stagedEntries[0]?.objectKey || null,
+      done: 0,
+      total: stagedEntries.length + errors.length,
+      percent: 0,
+    });
+
+    const processed = await Promise.all(
+      stagedEntries.map((entry) =>
+        limit(async () => {
+          try {
+            const file = await processBufferedFolderUploadEntry({ entry, request, jobId });
+            return { file };
+          } catch (e) {
+            if (isCancelled(jobId) || e?.message === 'Job cancelled') {
+              throw e;
+            }
+            const status = e?.status || e?.response?.status || e?.response?.data?.status;
+            const code = e?.code || e?.response?.data?.code;
+            const message = e?.response?.data?.message || e?.message || 'Upload failed';
+            return {
+              error: {
+                fileName: entry.sourceName,
+                objectKey: entry.objectKey,
+                error: message,
+                status: status ?? null,
+                code: code ?? null,
+              },
+            };
+          } finally {
+            completedEntries += 1;
+            const pct = Math.min(99, Math.round((completedEntries / Math.max(1, stagedEntries.length)) * 100));
+            updateJobThrottled(jobId, {
+              status: isCancelled(jobId) ? 'cancelled' : 'uploading',
+              current: entry.objectKey,
+              done: completedEntries,
+              total: stagedEntries.length + errors.length,
+              percent: pct,
+            });
+          }
+        }),
+      ),
+    );
+
+    for (const item of processed) {
+      if (item?.file) files.push(item.file);
+      if (item?.error) errors.push(item.error);
+    }
+
+    unregisterStageCleanup?.();
+    unregisterStageCleanup = null;
+    removeDirSafe(stagedRootDir);
+    stagedRootDir = null;
 
     if (isCancelled(jobId)) {
       updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
@@ -2456,6 +2557,14 @@ export async function uploadB2FolderMultipartController(request, reply) {
   } finally {
     try {
       clearCancelState(jobId);
+    } catch {
+    }
+    try {
+      unregisterStageCleanup?.();
+    } catch {
+    }
+    try {
+      removeDirSafe(stagedRootDir);
     } catch {
     }
   }

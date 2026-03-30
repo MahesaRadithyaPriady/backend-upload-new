@@ -10,7 +10,7 @@ Flow ini berbeda dari:
 Di sini FE hanya mengirim **URL**. Backend akan:
 
 - fetch/stream dari URL
-- jika `encode=1`: stream → `ffmpeg` → output HLS → upload ke B2
+- jika `encode=1`: stream → `ffmpeg` → output HLS fMP4 (`index.m3u8` + init `.mp4` + segmen `.m4s`) → upload ke B2
 - jika `encode=0`: stream → upload original ke B2
 
 ---
@@ -82,6 +82,7 @@ Jika `encode=0`:
 Jika `encode=1`:
 
 - Nama folder HLS dan nama segmen output akan dinormalisasi menjadi **URL-safe** agar aman dipakai di CDN/player.
+- Output media segment memakai format `.m4s` dan init segment `.mp4`.
 
 ```json
 {

@@ -5,6 +5,7 @@ import multipart from '@fastify/multipart';
 import dotenv from 'dotenv';
 
 import config from './config/config.js';
+import { clearAllJobs } from './lib/uploadJobsDb.js';
 
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerB2Routes } from './routes/b2.js';
@@ -55,6 +56,9 @@ registerAuthRoutes(fastify);
 registerB2Routes(fastify);
 registerCatalogRoutes(fastify);
 registerDriveRoutes(fastify);
+
+clearAllJobs();
+fastify.log.info('Cleared persisted upload jobs on startup');
 
 const port = Number(process.env.PORT || config.PORT || 4000);
 const host = process.env.HOST || '0.0.0.0';
