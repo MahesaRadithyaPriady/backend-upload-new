@@ -44,3 +44,8 @@ next-env.d.ts
 file_mapping.db
 storage_catalog.db
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+.env
