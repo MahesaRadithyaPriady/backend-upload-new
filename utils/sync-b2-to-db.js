@@ -83,9 +83,18 @@ async function syncAllFiles() {
       break;
     }
 
+    // Debug: log first file structure once
+    if (iterations === 1 && files[0]) {
+      console.log('[sync-b2-to-db] First file structure:', JSON.stringify(files[0], null, 2));
+    }
+
     for (const f of files) {
-      const fullName = f.fileName || '';
-      if (!fullName) continue;
+      // B2 API bisa return fileName atau fileId
+      const fullName = f.fileName || f.fileId || '';
+      if (!fullName) {
+        console.log('[sync-b2-to-db] Skip file without name:', JSON.stringify(f));
+        continue;
+      }
 
       const parts = splitPathParts(fullName);
       if (!parts.length) continue;
@@ -122,16 +131,22 @@ async function syncAllFiles() {
 
       const folderId = await ensureFolderHierarchy(folderPrefix);
 
+      // Get file size from various possible field names
+      const fileSize = Number(f.contentLength || f.size || f.contentLength || 0);
+      
+      // Get timestamp from various possible field names
+      const uploadTimestamp = f.uploadTimestamp || f.uploadTime || f.modifiedTime;
+      
       await upsertFile({
         folderId,
         fileName: displayName,
         originalName: fileName,
         filePath: fullName,
-        size: Number(f.contentLength) || 0,
+        size: fileSize,
         contentType: f.contentType || (fileName.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/MP2T'),
         fileType,
         isHLS,
-        uploadedAt: f.uploadTimestamp ? new Date(f.uploadTimestamp).toISOString() : undefined,
+        uploadedAt: uploadTimestamp ? new Date(uploadTimestamp).toISOString() : undefined,
       });
 
       totalFiles += 1;

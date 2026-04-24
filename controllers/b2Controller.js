@@ -203,12 +203,17 @@ export async function listB2Controller(request, reply) {
     }
 
     const items = [];
+    let totalFolders = 0;
+    let totalFiles = 0;
 
+    console.log(`[b2/list] page=${page}, limit=${limit}, offset=${offset}, folderId=${currentFolderId}, prefix=${normalizedPrefix}`);
+
+    // First: count total folders and files to determine pagination
     if (type !== 'file') {
-      // Ambil subfolder sebagai items folder
       const parentIdForFolders = currentFolderId;
-      const foldersRows = await listFoldersByParent({ parentId: parentIdForFolders, limit, offset });
-      for (const f of foldersRows) {
+      const foldersRows = await listFoldersByParent({ parentId: parentIdForFolders, limit: limit + 1, offset });
+      totalFolders = foldersRows.length;
+      for (const f of foldersRows.slice(0, limit)) {
         items.push({
           id: f.prefix,
           name: f.name,
@@ -217,24 +222,34 @@ export async function listB2Controller(request, reply) {
       }
     }
 
-    if (type === 'file' || type === 'all') {
-      // Ambil file langsung di bawah folder saat ini
+    // Calculate remaining limit for files
+    const remainingLimit = limit - items.length;
+    
+    if ((type === 'file' || type === 'all') && remainingLimit > 0) {
       const folderIdForFiles = normalizedPrefix ? currentFolderId : null;
-      const filesRows = await listFilesByFolder({ folderId: folderIdForFiles, limit, offset });
-      for (const f of filesRows) {
+      const filesRows = await listFilesByFolder({ folderId: folderIdForFiles, limit: remainingLimit + 1, offset });
+      totalFiles = filesRows.length;
+      for (const f of filesRows.slice(0, remainingLimit)) {
         items.push({
-          id: f.file_path,
-          name: f.file_name,
-          mimeType: f.content_type || 'application/octet-stream',
+          id: f.filePath,
+          name: f.fileName,
+          mimeType: f.contentType || 'application/octet-stream',
           size: Number(f.size) || 0,
-          modifiedTime: f.uploaded_at || null,
+          modifiedTime: f.uploadedAt ? new Date(f.uploadedAt).toISOString() : null,
         });
       }
     }
 
-    // Jika ada playlist HLS (index.m3u8) di prefix ini, tampilkan paling atas.
-    // Jangan mengubah urutan item lain.
+    // Jika ada playlist HLS (index.m3u8 atau master.m3u8) di prefix ini, tampilkan paling atas.
+    // Urutan prioritas: master.m3u8 > index.m3u8 > lainnya
     try {
+      // Prioritas 1: master.m3u8
+      const masterIdx = items.findIndex((it) => String(it?.name || '').toLowerCase() === 'master.m3u8');
+      if (masterIdx > 0) {
+        const [picked] = items.splice(masterIdx, 1);
+        items.unshift(picked);
+      }
+      // Prioritas 2: index.m3u8 (setelah master)
       const idx = items.findIndex((it) => String(it?.name || '').toLowerCase() === 'index.m3u8');
       if (idx > 0) {
         const [picked] = items.splice(idx, 1);
@@ -243,7 +258,8 @@ export async function listB2Controller(request, reply) {
     } catch {
     }
 
-    const hasMore = items.length === limit;
+    // Determine hasMore based on whether we got more than limit items
+    const hasMore = totalFolders > limit || totalFiles > remainingLimit;
     const nextPageToken = hasMore ? String(page + 1) : null;
 
     return reply
