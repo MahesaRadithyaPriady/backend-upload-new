@@ -93,14 +93,44 @@ async function syncAllFiles() {
       const fileName = parts[parts.length - 1];
       const folderPrefix = parts.length > 1 ? `${parts.slice(0, -1).join('/')}/` : '';
 
+      // Detect HLS files and extract better name
+      const isHLS = fileName.endsWith('.m3u8') || fileName.endsWith('.ts');
+      let displayName = fileName;
+      let fileType = 'video';
+
+      if (isHLS) {
+        // Try to extract episode info from path
+        // Pattern: anime_xxx/Eps.yy/... or similar
+        const animeMatch = folderPrefix.match(/anime[_-]?(\d+)/i);
+        const epsMatch = folderPrefix.match(/eps[._-]?(\d+)/i) || folderPrefix.match(/episode[_-]?(\d+)/i);
+        
+        if (animeMatch && epsMatch) {
+          const animeId = animeMatch[1];
+          const epsNum = epsMatch[1];
+          
+          if (fileName === 'master.m3u8') {
+            displayName = `[Anime ${animeId}] Ep.${epsNum} - Master Playlist`;
+          } else if (fileName.endsWith('.m3u8')) {
+            displayName = `[Anime ${animeId}] Ep.${epsNum} - ${fileName}`;
+          } else if (fileName.endsWith('.ts')) {
+            // For .ts segments, show shorter name
+            displayName = `[Anime ${animeId}] Ep.${epsNum} - Segment`;
+            fileType = 'segment';
+          }
+        }
+      }
+
       const folderId = await ensureFolderHierarchy(folderPrefix);
 
       await upsertFile({
         folderId,
-        fileName,
+        fileName: displayName,
+        originalName: fileName,
         filePath: fullName,
         size: Number(f.contentLength) || 0,
-        contentType: f.contentType || 'application/octet-stream',
+        contentType: f.contentType || (fileName.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/MP2T'),
+        fileType,
+        isHLS,
         uploadedAt: f.uploadTimestamp ? new Date(f.uploadTimestamp).toISOString() : undefined,
       });
 
