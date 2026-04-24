@@ -101,7 +101,7 @@ export async function getDriveB2StreamUrlController(request, reply) {
   const ttl = ttlSeconds ?? (ttlMinutes != null ? ttlMinutes * 60 : 5 * 3600);
 
   try {
-    const mapping = getDriveB2MappingByDriveId(String(driveFileId));
+    const mapping = await getDriveB2MappingByDriveId(String(driveFileId));
     if (!mapping?.b2ObjectKey) {
       return reply.code(404).send({ error: 'B2 mapping not found for drive file', driveFileId });
     }
@@ -259,7 +259,7 @@ export async function streamDriveB2Controller(request, reply) {
   }
 
   try {
-    const mapping = getDriveB2MappingByDriveId(String(driveFileId));
+    const mapping = await getDriveB2MappingByDriveId(String(driveFileId));
     if (!mapping?.b2ObjectKey) {
       return reply.code(404).send({ error: 'B2 mapping not found for drive file', driveFileId });
     }

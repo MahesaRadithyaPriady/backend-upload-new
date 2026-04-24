@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model FileMapping {
+  driveFileId String   @id @map("driveFileId")
+  b2ObjectKey String
+  status      String   @default("pending")
+  createdAt   DateTime @default(now()) @map("createdAt")
+  updatedAt   DateTime @updatedAt @map("updatedAt")
+
+  @@map("file_mapping")
+}
+
+model DriveB2Mapping {
+  driveFileId      String   @id @map("driveFileId")
+  drivePath        String?
+  driveFolderId    String?
+  driveDriveId     String?
+  b2ObjectKey      String   @unique
+  b2Prefix         String?
+  b2CatalogFolderId Int?
+  status           String   @default("linked")
+  createdAt        DateTime @default(now()) @map("createdAt")
+  updatedAt        DateTime @updatedAt @map("updatedAt")
+
+  @@index([drivePath])
+  @@map("drive_b2_mapping")
+}
+
+model Folder {
+  id        Int      @id @default(autoincrement())
+  name      String
+  prefix    String   @unique
+  parentId  Int?     @map("parent_id")
+  fileCount Int?     @default(0) @map("file_count")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  parent   Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children Folder[] @relation("FolderTree")
+  files    File[]
+
+  @@map("folders")
+}
+
+model File {
+  id          Int      @id @default(autoincrement())
+  folderId    Int?     @map("folder_id")
+  fileName    String   @map("file_name")
+  filePath    String   @unique @map("file_path")
+  size        BigInt   @default(0)
+  contentType String   @default("application/octet-stream") @map("content_type")
+  uploadedAt  DateTime @default(now()) @map("uploaded_at")
+  isMaster    Int      @default(0) @map("is_master")
+  isLow       Int      @default(0) @map("is_low")
+
+  folder Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  @@map("files")
+}
+
+model HlsEncodeRecord {
+  id           Int      @id @default(autoincrement())
+  episodeId    Int      @map("episode_id")
+  jobId        String   @map("job_id")
+  namaQuality  String   @map("nama_quality")
+  status       String   @default("pending")
+  hlsUrl       String?  @map("hls_url")
+  masterUrl    String?  @map("master_url")
+  masterSize   BigInt?  @map("master_size")
+  errorMessage String?  @map("error_message")
+  resolution   String?
+  bitrate      String?
+  segments     Int?
+  duration     Float?
+  encodedAt    DateTime? @map("encoded_at")
+  syncedAt     DateTime? @map("synced_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@unique([episodeId, namaQuality])
+  @@index([episodeId])
+  @@index([jobId])
+  @@index([status])
+  @@map("hls_encode_records")
+}
+
+model UploadJob {
+  id          String   @id
+  prefix      String?
+  status      String?
+  current     String?
+  done        Int?     @default(0)
+  total       Int?     @default(0)
+  percent     Int?     @default(0)
+  error       String?
+  createdAtMs BigInt?  @map("created_at_ms")
+  updatedAtMs BigInt?  @map("updated_at_ms")
+
+  @@index([prefix])
+  @@index([updatedAtMs], map: "idx_upload_jobs_updated")
+  @@map("upload_jobs")
+}
+
+model PopularEncodeProgress {
+  id              Int      @id @default(autoincrement())
+  dateKey         String   @unique @map("date_key")
+  animeEncoded    Int      @default(0) @map("anime_encoded")
+  lastAnimeId     Int?     @map("last_anime_id")
+  lastEpisodeId   Int?     @map("last_episode_id")
+  lastEpisodeNumber String? @map("last_episode_number")
+  completed       Boolean  @default(false)
+  errorCount      Int      @default(0) @map("error_count")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([dateKey])
+  @@map("popular_encode_progress")
+}

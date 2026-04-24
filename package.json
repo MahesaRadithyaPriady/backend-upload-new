@@ -7,6 +7,14 @@
   "scripts": {
     "dev": "nodemon index.js",
     "migrate:drive:b2": "node utils/migrate-drive-to-b2.js",
+    "migrate:popular:encode": "node utils/migrate-popular-encode.js",
+    "migrate:popular:encode:win": "powershell -ExecutionPolicy Bypass -File utils/migrate-popular-encode.ps1",
+    "reset:daily:limit": "node utils/reset-daily-limit.js",
+    "reset:daily:limit:win": "powershell -ExecutionPolicy Bypass -File utils/reset-daily-limit.ps1",
+    "db:migrate": "prisma migrate dev --name",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -19,6 +27,8 @@
     "@fastify/cookie": "^10.0.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/multipart": "^9.3.0",
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
     "backblaze-b2": "^1.7.1",
     "better-sqlite3": "12.5.0",
     "crypto": "^1.0.1",
@@ -29,6 +39,8 @@
     "googleapis": "^168.0.0",
     "node-fetch": "^3.3.2",
     "p-limit": "^6.2.0",
+    "pg": "^8.20.0",
+    "prisma": "^7.7.0",
     "sqlite": "^5.1.1"
   },
   "devDependencies": {

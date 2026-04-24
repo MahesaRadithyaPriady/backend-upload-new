@@ -21,7 +21,7 @@ export async function listCatalogController(request, reply) {
 
     let parentFolderId = null;
     if (normalizedPrefix) {
-      const folder = getFolderByPrefix(normalizedPrefix);
+      const folder = await getFolderByPrefix(normalizedPrefix);
       if (!folder) {
         return reply
           .headers({
@@ -37,13 +37,13 @@ export async function listCatalogController(request, reply) {
     let files = [];
 
     if (type === 'folder' || type === 'all') {
-      folders = listFoldersByParent({ parentId: parentFolderId, limit, offset });
+      folders = await listFoldersByParent({ parentId: parentFolderId, limit, offset });
     }
 
     if (type === 'file' || type === 'all') {
       // Files are always tied to the current folder (not parent of current prefix)
       const folderIdForFiles = normalizedPrefix ? parentFolderId : null;
-      files = listFilesByFolder({ folderId: folderIdForFiles, limit, offset });
+      files = await listFilesByFolder({ folderId: folderIdForFiles, limit, offset });
     }
 
     const hasMore = folders.length + files.length === limit;

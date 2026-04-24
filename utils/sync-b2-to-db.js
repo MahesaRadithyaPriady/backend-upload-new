@@ -44,15 +44,15 @@ async function ensureFolderHierarchy(prefix) {
   for (const part of parts) {
     currentPrefix = currentPrefix ? `${currentPrefix}${part}/` : `${part}/`;
 
-    let existing = getFolderByPrefix(currentPrefix);
+    let existing = await getFolderByPrefix(currentPrefix);
     if (!existing) {
-      upsertFolder({
+      await upsertFolder({
         name: part,
         prefix: currentPrefix,
         parentId,
         fileCount: null,
       });
-      existing = getFolderByPrefix(currentPrefix);
+      existing = await getFolderByPrefix(currentPrefix);
     }
 
     parentId = existing?.id ?? parentId;
@@ -62,7 +62,7 @@ async function ensureFolderHierarchy(prefix) {
 }
 
 async function syncAllFiles() {
-  console.log('[sync-b2-to-db] Start sync from B2 to SQLite catalog');
+  console.log('[sync-b2-to-db] Start sync from B2 to PostgreSQL catalog');
 
   let pageToken = undefined;
   let totalFiles = 0;
@@ -95,7 +95,7 @@ async function syncAllFiles() {
 
       const folderId = await ensureFolderHierarchy(folderPrefix);
 
-      upsertFile({
+      await upsertFile({
         folderId,
         fileName,
         filePath: fullName,

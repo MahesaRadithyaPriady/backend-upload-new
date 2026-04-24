@@ -173,9 +173,9 @@ function parseFfmpegProgressSec(input) {
   return parseDurationToSec(m[1]);
 }
 
-function updateEncodeJobProgress(jobId, { current, seconds, duration, pctMin = 1, pctMax = 49 } = {}) {
+async function updateEncodeJobProgress(jobId, { current, seconds, duration, pctMin = 1, pctMax = 49 } = {}) {
   if (!jobId) return null;
-  const prev = getJobById(jobId);
+  const prev = await getJobById(jobId);
   const prevPercent = Number(prev?.percent);
   let percent = Number.isFinite(prevPercent) ? prevPercent : 0;
 
@@ -227,12 +227,9 @@ export async function streamUploadJobsSseController(request, reply) {
 
   writeEvent('hello', { ok: true, activeOnly, limit: limit ?? null });
 
-  const getJobs = () => {
-    const jobs = listJobs({ activeOnly, limit });
-    return Array.isArray(jobs) ? jobs : [];
-  };
+  const getJobs = () => listJobs({ activeOnly, limit }).then((jobs) => (Array.isArray(jobs) ? jobs : []));
 
-  const jobsNow = getJobs();
+  const jobsNow = await getJobs();
   writeEvent('update', { jobs: jobsNow });
 
   let lastUpdatedAt = jobsNow.length ? (jobsNow[0]?.updated_at_ms ?? null) : null;
@@ -244,9 +241,9 @@ export async function streamUploadJobsSseController(request, reply) {
     return Math.min(Math.trunc(n), 5000);
   })();
 
-  const timer = setInterval(() => {
+  const timer = setInterval(async () => {
     try {
-      const jobs = getJobs();
+      const jobs = await getJobs();
       const updated = jobs.length ? (jobs[0]?.updated_at_ms ?? null) : null;
       const count = jobs.length;
       if (updated === lastUpdatedAt && count === lastCount) return;
@@ -628,9 +625,9 @@ async function uploadHlsOutputsToB2({ request, dirPath, hlsPrefix, folderId, job
 
     doneOut += 1;
     const pct = 50 + Math.round((doneOut / Math.max(1, totalOut)) * 50);
-    updateJobThrottled(jobId, { status: 'uploading', current: key, percent: Math.min(99, pct) });
+    await updateJobThrottled(jobId, { status: 'uploading', current: key, percent: Math.min(99, pct) });
 
-    upsertFile({
+    await upsertFile({
       folderId,
       fileName: f,
       filePath: key,
@@ -755,15 +752,15 @@ async function ensureFolderHierarchy(prefix) {
   for (const part of parts) {
     currentPrefix = currentPrefix ? `${currentPrefix}${part}/` : `${part}/`;
 
-    let existing = getFolderByPrefix(currentPrefix);
+    let existing = await getFolderByPrefix(currentPrefix);
     if (!existing) {
-      upsertFolder({
+      await upsertFolder({
         name: part,
         prefix: currentPrefix,
         parentId,
         fileCount: null,
       });
-      existing = getFolderByPrefix(currentPrefix);
+      existing = await getFolderByPrefix(currentPrefix);
     }
 
     parentId = existing?.id ?? parentId;
@@ -893,7 +890,7 @@ export async function importB2ByUrlController(request, reply) {
     })();
 
     jobId = resolveRequestedJobId(body?.jobId, body?.job_id, request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
-    upsertJob({ id: jobId, prefix: prefixCleaned || null, status: 'downloading', current: objectKey, done: 0, total: 0, percent: 0 });
+    await upsertJob({ id: jobId, prefix: prefixCleaned || null, status: 'downloading', current: objectKey, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
 
     const ac = new AbortController();
@@ -947,12 +944,12 @@ export async function importB2ByUrlController(request, reply) {
     const files = [];
 
     if (isCancelled(jobId)) {
-      updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
       return reply.code(409).send({ error: 'Job cancelled', jobId });
     }
 
     if (encode) {
-      updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
+      await updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
       const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
@@ -985,7 +982,7 @@ export async function importB2ByUrlController(request, reply) {
           totalBytes: declaredSize,
         });
 
-        updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
+        await updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
         await packageToHls({
           inputPath: tempInputPath,
           outDir: hlsOutDir,
@@ -996,7 +993,7 @@ export async function importB2ByUrlController(request, reply) {
         });
         validateHlsOutputs({ dirPath: hlsOutDir, playlistName: 'index.m3u8' });
 
-        updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
+        await updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
 
         const folderId = await ensureFolderHierarchy(hlsPrefix);
         await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
@@ -1013,7 +1010,7 @@ export async function importB2ByUrlController(request, reply) {
         removeDirSafe(tmpDir);
       }
     } else {
-      updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 0 });
+      await updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 0 });
 
       const logger = startUploadProgressLogger({ request, label: `b2-import:${objectKey}`, totalBytes: declaredSize });
       inputStream.pipe(logger.passthrough);
@@ -1029,14 +1026,14 @@ export async function importB2ByUrlController(request, reply) {
       const size = Number(uploadRes?.contentLength) || (Number.isFinite(declaredSize) ? declaredSize : 0);
       const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
       const ct = uploadRes?.contentType || contentType || 'application/octet-stream';
-      upsertFile({ folderId, fileName: baseName, filePath: objectKey, size, contentType: ct, uploadedAt });
+      await upsertFile({ folderId, fileName: baseName, filePath: objectKey, size, contentType: ct, uploadedAt });
       files.push({ id: objectKey, name: baseName, mimeType: ct, size, modifiedTime: uploadedAt || null });
     }
 
     if (isCancelled(jobId)) {
-      updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100 });
     } else {
-      updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100 });
     }
 
     return reply
@@ -1046,9 +1043,9 @@ export async function importB2ByUrlController(request, reply) {
     request.log.error({ message: err?.message, stack: err?.stack }, 'Import by URL error');
     if (jobId) {
       if (isCancelled(jobId)) {
-        updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
+        await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
       } else {
-        updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Import failed', percent: 100 });
+        await updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Import failed', percent: 100 });
       }
     }
     return reply.code(500).send({ error: 'Failed to import by URL', details: err?.message, jobId, ssePath: buildUploadJobSsePath(jobId) });
@@ -1090,7 +1087,7 @@ export async function createDirectUploadLinkController(request, reply) {
     const expiresAtMs = Date.now() + ttlSeconds * 1000;
 
     const jobId = resolveRequestedJobId(body?.jobId, body?.job_id, request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
-    upsertJob({ id: jobId, prefix: prefix || null, status: 'waiting_upload', current: null, done: 0, total: 0, percent: 0 });
+    await upsertJob({ id: jobId, prefix: prefix || null, status: 'waiting_upload', current: null, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
 
     const token = makeDirectUploadToken();
@@ -1166,10 +1163,10 @@ export async function directUploadPutController(request, reply) {
   const baseName = norm.baseName;
   const folderPrefix = norm.folderPrefix;
 
-  updateJobThrottled(jobId, { status: entry.encode ? 'encoding' : 'uploading', current: objectKey, percent: 0, prefix: prefixCleaned || null });
+  await updateJobThrottled(jobId, { status: entry.encode ? 'encoding' : 'uploading', current: objectKey, percent: 0, prefix: prefixCleaned || null });
 
   if (isCancelled(jobId)) {
-    updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
+    await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
     return reply.code(409).send({ error: 'Job cancelled' });
   }
 
@@ -1208,7 +1205,7 @@ export async function directUploadPutController(request, reply) {
         } catch {
         }
 
-        updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
+        await updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
         await streamToTempInputFile({
           inputStream,
           outputPath: tempInputPath,
@@ -1218,7 +1215,7 @@ export async function directUploadPutController(request, reply) {
           totalBytes: declaredSize,
         });
 
-        updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
+        await updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
         await packageToHls({
           inputPath: tempInputPath,
           outDir: hlsOutDir,
@@ -1229,7 +1226,7 @@ export async function directUploadPutController(request, reply) {
         });
         validateHlsOutputs({ dirPath: hlsOutDir, playlistName: 'index.m3u8' });
 
-        updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
+        await updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
 
         const folderId = await ensureFolderHierarchy(hlsPrefix);
         await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
@@ -1260,14 +1257,14 @@ export async function directUploadPutController(request, reply) {
       const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
       const ct = uploadRes?.contentType || contentType || 'application/octet-stream';
 
-      upsertFile({ folderId, fileName: baseName, filePath: objectKey, size, contentType: ct, uploadedAt });
+      await upsertFile({ folderId, fileName: baseName, filePath: objectKey, size, contentType: ct, uploadedAt });
       files.push({ id: objectKey, name: baseName, mimeType: ct, size, modifiedTime: uploadedAt || null });
     }
 
     if (isCancelled(jobId)) {
-      updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100 });
     } else {
-      updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100 });
     }
 
     return reply
@@ -1277,9 +1274,9 @@ export async function directUploadPutController(request, reply) {
     request.log.error({ message: err?.message, stack: err?.stack }, 'Direct upload error');
     if (jobId) {
       if (isCancelled(jobId)) {
-        updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
+        await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
       } else {
-        updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Upload failed', percent: 100 });
+        await updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Upload failed', percent: 100 });
       }
     }
     return reply.code(500).send({ error: 'Failed to upload', details: err?.message, jobId, ssePath: buildUploadJobSsePath(jobId) });
@@ -1367,7 +1364,7 @@ export async function commitB2UploadController(request, reply) {
       }
 
       try {
-        upsertFile({
+        await upsertFile({
           folderId,
           fileName: baseName,
           filePath: objectKey,
@@ -1398,9 +1395,9 @@ export async function commitB2UploadController(request, reply) {
 
     if (jobId) {
       if (isCancelled(jobId)) {
-        updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
+        await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
       } else {
-        updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100 });
+        await updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100 });
       }
     }
 
@@ -2029,7 +2026,7 @@ export async function uploadB2AndCatalogController(request, reply) {
         const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
         const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
 
-        upsertFile({
+        await upsertFile({
           folderId,
           fileName: baseName,
           filePath: objectKey,
@@ -2113,7 +2110,7 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
   const { objectKey, baseName, folderPrefix, declaredSize, wantEncode, fileType, tempInputPath } = entry;
 
   try {
-    updateJobThrottled(jobId, { status: wantEncode ? 'encoding' : 'uploading', current: objectKey });
+    await updateJobThrottled(jobId, { status: wantEncode ? 'encoding' : 'uploading', current: objectKey });
 
     if (isCancelled(jobId)) {
       throw new Error('Job cancelled');
@@ -2141,7 +2138,7 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
         } catch {
         }
 
-        updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
+        await updateJobThrottled(jobId, { status: 'encoding', current: objectKey, percent: 5 });
         await packageToHls({
           inputPath: tempInputPath,
           outDir: hlsOutDir,
@@ -2152,7 +2149,7 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
         });
         validateHlsOutputs({ dirPath: hlsOutDir, playlistName: 'index.m3u8' });
 
-        updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
+        await updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 50 });
 
         const folderId = await ensureFolderHierarchy(hlsPrefix);
         await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
@@ -2195,7 +2192,7 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
     const uploadedAt = uploadRes?.uploadTimestamp ? new Date(uploadRes.uploadTimestamp).toISOString() : undefined;
     const contentType = uploadRes?.contentType || fileType || 'application/octet-stream';
 
-    upsertFile({
+    await upsertFile({
       folderId,
       fileName: baseName,
       filePath: objectKey,
@@ -2264,7 +2261,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
     };
 
     jobId = resolveRequestedJobId(request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
-    upsertJob({ id: jobId, prefix: null, status: 'receiving', current: null, done: 0, total: 0, percent: 0 });
+    await upsertJob({ id: jobId, prefix: null, status: 'receiving', current: null, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
     stagedRootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'folder-upload-'));
     unregisterStageCleanup = registerJobCleanup(jobId, () => {
@@ -2272,7 +2269,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
     });
 
     if (prefixCleaned) {
-      updateJobThrottled(jobId, { prefix: prefixCleaned || null });
+      await updateJobThrottled(jobId, { prefix: prefixCleaned || null });
     }
 
     const parts = request.parts();
@@ -2283,7 +2280,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
 
         if (fieldname === 'prefix') {
           prefixCleaned = cleanRelativePath(part.value);
-          updateJobThrottled(jobId, { prefix: prefixCleaned || null });
+          await updateJobThrottled(jobId, { prefix: prefixCleaned || null });
         }
         if (fieldname === 'encode') {
           encodeGlobal = parseEncodeFlag(part.value);
@@ -2399,7 +2396,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
         if (isCancelled(jobId)) {
           throw new Error('Job cancelled');
         }
-        updateJobThrottled(jobId, { status: 'receiving', current: objectKey });
+        await updateJobThrottled(jobId, { status: 'receiving', current: objectKey });
 
         const tempInputPath = path.join(
           stagedRootDir,
@@ -2458,7 +2455,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
     } catch {
     }
 
-    updateJobThrottled(jobId, {
+    await updateJobThrottled(jobId, {
       status: 'processing',
       current: stagedEntries[0]?.objectKey || null,
       done: 0,
@@ -2491,7 +2488,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
           } finally {
             completedEntries += 1;
             const pct = Math.min(99, Math.round((completedEntries / Math.max(1, stagedEntries.length)) * 100));
-            updateJobThrottled(jobId, {
+            await updateJobThrottled(jobId, {
               status: isCancelled(jobId) ? 'cancelled' : 'uploading',
               current: entry.objectKey,
               done: completedEntries,
@@ -2514,9 +2511,9 @@ export async function uploadB2FolderMultipartController(request, reply) {
     stagedRootDir = null;
 
     if (isCancelled(jobId)) {
-      updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
     } else {
-      updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100 });
     }
 
     const statusCode = errors.length ? 207 : 200;
@@ -2542,9 +2539,9 @@ export async function uploadB2FolderMultipartController(request, reply) {
 
     if (jobId) {
       if (isCancelled(jobId)) {
-        updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
+        await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', percent: 100 });
       } else {
-        updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Upload failed', percent: 100 });
+        await updateJobThrottled(jobId, { status: 'error', error: err?.message || 'Upload failed', percent: 100 });
       }
     }
     return reply
@@ -2574,18 +2571,18 @@ export async function deleteUploadJobController(request, reply) {
   const id = request.params?.id || request.query?.id;
   if (!id) return reply.code(400).send({ error: 'Missing id' });
 
-  const existing = getJobById(id);
+  const existing = await getJobById(id);
   if (!existing) {
     cancelJob(id);
     runJobCleanup(id);
-    deleteJobById(id);
+    await deleteJobById(id);
     return reply.headers({ 'Cache-Control': 'no-store' }).send({ ok: true });
   }
 
   cancelJob(id);
   runJobCleanup(id);
-  updateJobThrottled(id, { status: 'cancelled', error: 'Cancelled', percent: 100 });
-  deleteJobById(id);
+  await updateJobThrottled(id, { status: 'cancelled', error: 'Cancelled', percent: 100 });
+  await deleteJobById(id);
 
   return reply.headers({ 'Cache-Control': 'no-store' }).send({ ok: true });
 }
@@ -2593,7 +2590,7 @@ export async function deleteUploadJobController(request, reply) {
 export async function getUploadJobController(request, reply) {
   const id = request.params?.id || request.query?.id;
   if (!id) return reply.code(400).send({ error: 'Missing id' });
-  const job = getJobById(id);
+  const job = await getJobById(id);
   if (!job) return reply.code(404).send({ error: 'Job not found' });
   return reply.headers({ 'Cache-Control': 'no-store' }).send(job);
 }
@@ -2602,7 +2599,7 @@ export async function getUploadJobByPrefixController(request, reply) {
   const prefix = request.query?.prefix;
   if (!prefix) return reply.code(400).send({ error: 'Missing prefix' });
   const cleaned = cleanRelativePath(prefix);
-  const job = getJobByPrefix(cleaned);
+  const job = await getJobByPrefix(cleaned);
   if (!job) return reply.code(404).send({ error: 'Job not found' });
   return reply.headers({ 'Cache-Control': 'no-store' }).send(job);
 }
@@ -2611,7 +2608,7 @@ export async function listUploadJobsController(request, reply) {
   const active = request.query?.active;
   const limit = request.query?.limit;
   const activeOnly = active === '1' || active === 'true' || active === 'yes';
-  const jobs = listJobs({ activeOnly, limit });
+  const jobs = await listJobs({ activeOnly, limit });
   return reply.headers({ 'Cache-Control': 'no-store' }).send({ jobs });
 }
 
@@ -2628,7 +2625,7 @@ export async function streamUploadJobSseController(request, reply) {
   const getJob = () => {
     if (id) return getJobById(id);
     if (cleanedPrefix) return getJobByPrefix(cleanedPrefix);
-    return null;
+    return Promise.resolve(null);
   };
 
   const origin = request.headers?.origin || '*';
@@ -2656,7 +2653,7 @@ export async function streamUploadJobSseController(request, reply) {
   writeEvent('hello', { ok: true, id: id || null, prefix: cleanedPrefix || null });
 
   let lastUpdatedAt = null;
-  const firstJob = getJob();
+  const firstJob = await getJob();
   if (firstJob) {
     lastUpdatedAt = firstJob.updated_at_ms ?? null;
     writeEvent('update', firstJob);
@@ -2670,9 +2667,9 @@ export async function streamUploadJobSseController(request, reply) {
     return Math.min(Math.trunc(n), 5000);
   })();
 
-  const timer = setInterval(() => {
+  const timer = setInterval(async () => {
     try {
-      const job = getJob();
+      const job = await getJob();
       if (!job) {
         writeEvent('not_found', { error: 'Job not found' });
         return;

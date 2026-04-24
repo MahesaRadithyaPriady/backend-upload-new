@@ -134,7 +134,7 @@ function splitPrefixParts(prefix) {
     .filter(Boolean);
 }
 
-function ensureFolderHierarchySync(prefix) {
+async function ensureFolderHierarchySync(prefix) {
   const cleaned = String(prefix || '')
     .replace(/^\/+|\/+$/g, '')
     .trim();
@@ -150,15 +150,15 @@ function ensureFolderHierarchySync(prefix) {
   for (const part of parts) {
     currentPrefix = currentPrefix ? `${currentPrefix}${part}/` : `${part}/`;
 
-    let existing = getFolderByPrefix(currentPrefix);
+    let existing = await getFolderByPrefix(currentPrefix);
     if (!existing) {
-      upsertFolder({
+      await upsertFolder({
         name: part,
         prefix: currentPrefix,
         parentId,
         fileCount: null,
       });
-      existing = getFolderByPrefix(currentPrefix);
+      existing = await getFolderByPrefix(currentPrefix);
     }
 
     parentId = existing?.id ?? parentId;
@@ -190,7 +190,7 @@ export async function listB2Controller(request, reply) {
     // Tentukan folder saat ini di katalog (jika ada)
     let currentFolderId = null;
     if (normalizedPrefix) {
-      const folder = getFolderByPrefix(normalizedPrefix);
+      const folder = await getFolderByPrefix(normalizedPrefix);
       if (!folder) {
         return reply
           .headers({
@@ -207,7 +207,7 @@ export async function listB2Controller(request, reply) {
     if (type !== 'file') {
       // Ambil subfolder sebagai items folder
       const parentIdForFolders = currentFolderId;
-      const foldersRows = listFoldersByParent({ parentId: parentIdForFolders, limit, offset });
+      const foldersRows = await listFoldersByParent({ parentId: parentIdForFolders, limit, offset });
       for (const f of foldersRows) {
         items.push({
           id: f.prefix,
@@ -220,7 +220,7 @@ export async function listB2Controller(request, reply) {
     if (type === 'file' || type === 'all') {
       // Ambil file langsung di bawah folder saat ini
       const folderIdForFiles = normalizedPrefix ? currentFolderId : null;
-      const filesRows = listFilesByFolder({ folderId: folderIdForFiles, limit, offset });
+      const filesRows = await listFilesByFolder({ folderId: folderIdForFiles, limit, offset });
       for (const f of filesRows) {
         items.push({
           id: f.file_path,
@@ -289,7 +289,7 @@ export async function createB2FolderController(request, reply) {
         .send({ error: 'Missing prefix' });
     }
 
-    const folder = ensureFolderHierarchySync(cleaned);
+    const folder = await ensureFolderHierarchySync(cleaned);
 
     return reply
       .headers({
@@ -340,19 +340,20 @@ export async function listB2FoldersController(request, reply) {
 
     let parentFolderId = null;
     if (normalizedPrefix) {
-      const folder = getFolderByPrefix(normalizedPrefix);
+      const folder = await getFolderByPrefix(normalizedPrefix);
       if (!folder) {
         return reply
           .headers({
             'Cache-Control': 'no-store, no-cache, must-revalidate',
             Pragma: 'no-cache',
           })
-          .send({ folders: [], nextPageToken: null });
+          .code(404)
+          .send({ error: 'Folder not found in catalog', prefix: normalizedPrefix });
       }
       parentFolderId = folder.id;
     }
 
-    const folderRows = listFoldersByParent({ parentId: parentFolderId, limit, offset });
+    const folderRows = await listFoldersByParent({ parentId: parentFolderId, limit, offset });
     const folders = folderRows.map((f) => ({
       id: f.prefix,
       name: f.name,
@@ -633,7 +634,7 @@ export async function deleteB2FileController(request, reply) {
     // Coba hapus sebagai satu file spesifik terlebih dahulu
     try {
       await deleteFileByName(target);
-      deleteFileByPath(target);
+      await deleteFileByPath(target);
 
       return reply
         .headers({
@@ -719,8 +720,8 @@ export async function deleteB2FileController(request, reply) {
     }
 
     // Hapus dari katalog lokal
-    deleteFilesByPrefix(cleaned);
-    deleteFoldersByPrefix(cleaned);
+    await deleteFilesByPrefix(cleaned);
+    await deleteFoldersByPrefix(cleaned);
 
     return reply
       .headers({
@@ -787,7 +788,7 @@ export async function renameB2FileController(request, reply) {
     await deleteFile({ fileId: file.fileId, fileName: oldPath });
 
     // Update katalog lokal
-    updateFilePathAndName({ oldPath, newPath, newName });
+    await updateFilePathAndName({ oldPath, newPath, newName });
 
     return reply
       .headers({

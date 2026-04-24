@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import process from 'process';
-import Database from 'better-sqlite3';
+import dotenv from 'dotenv';
+import { prisma } from '../lib/prisma.js';
+
+dotenv.config();
 
 const MB = 1024 * 1024;
 const QUALITY_SCORE = {
@@ -136,26 +139,25 @@ function pickLow(items) {
   return best;
 }
 
-function ensureColumns(db) {
-  const cols = db.prepare(`PRAGMA table_info(files);`).all();
-  const names = new Set(cols.map((c) => String(c.name)));
-  if (!names.has('is_master')) db.exec(`ALTER TABLE files ADD COLUMN is_master INTEGER DEFAULT 0;`);
-  if (!names.has('is_low')) db.exec(`ALTER TABLE files ADD COLUMN is_low INTEGER DEFAULT 0;`);
-}
-
-function main() {
+async function main() {
   const args = parseArgs(process.argv);
-  const dbPath = path.resolve(String(args.db || args._[0] || 'storage_catalog.db'));
   const apply = args.apply === true || String(args.apply || '').toLowerCase() === 'true';
   const outPath = path.resolve(String(args.out || 'warning.txt'));
 
-  const db = new Database(dbPath);
-  db.pragma('foreign_keys = ON');
-  ensureColumns(db);
+  const rawRows = await prisma.file.findMany({
+    where: { folderId: { not: null } },
+    select: { id: true, folderId: true, filePath: true, size: true, isMaster: true, isLow: true },
+    orderBy: [{ folderId: 'asc' }, { id: 'asc' }],
+  });
 
-  const rows = db
-    .prepare(`SELECT id, folder_id, file_path, size FROM files WHERE folder_id IS NOT NULL ORDER BY folder_id ASC, id ASC;`)
-    .all();
+  const rows = rawRows.map((r) => ({
+    id: r.id,
+    folder_id: r.folderId,
+    file_path: r.filePath,
+    size: Number(r.size),
+    is_master: r.isMaster,
+    is_low: r.isLow,
+  }));
 
   const byEpisodeGroup = new Map();
   const fallbackSizeItems = [];
@@ -180,8 +182,6 @@ function main() {
 
   const masterIds = new Set();
   const lowIds = new Set();
-  const missingMasterFolders = [];
-  const missingLowFolders = [];
   const insufficientQualityFolders = [];
 
   const groupDetails = new Map();
@@ -223,20 +223,20 @@ function main() {
   }
 
   if (apply) {
-    const tx = db.transaction(() => {
-      db.exec(`UPDATE files SET is_master = 0, is_low = 0;`);
-      const setMaster = db.prepare(`UPDATE files SET is_master = 1 WHERE id = ?;`);
-      const setLow = db.prepare(`UPDATE files SET is_low = 1 WHERE id = ?;`);
-      for (const id of masterIds) setMaster.run(id);
-      for (const id of lowIds) setLow.run(id);
-    });
-    tx();
+    await prisma.file.updateMany({ data: { isMaster: 0, isLow: 0 } });
+    for (const id of masterIds) {
+      await prisma.file.update({ where: { id }, data: { isMaster: 1 } });
+    }
+    for (const id of lowIds) {
+      await prisma.file.update({ where: { id }, data: { isLow: 1 } });
+    }
   }
+
+  const flagMap = new Map(rows.map((r) => [r.id, { is_master: r.is_master, is_low: r.is_low }]));
 
   const lines = [];
 
   lines.push('== SUMMARY ==');
-  lines.push(`db=${dbPath}`);
   lines.push(`episode_groups_scanned=${byEpisodeGroup.size}`);
   lines.push(`files_scanned=${rows.length}`);
   lines.push(`apply=${apply ? 'true' : 'false'}`);
@@ -271,12 +271,11 @@ function main() {
   if (!insufficientQualityFolders.length) {
     lines.push('(none)');
   } else {
-    const q = db.prepare('SELECT is_master, is_low FROM files WHERE id = ?;');
     for (const it of insufficientQualityFolders) {
       const groupKey = `${it.folderId}:${it.episodeKey}`;
       const items = groupDetails.get(groupKey) || [];
       for (const f of items) {
-        const flags = q.get(f.id) || { is_master: 0, is_low: 0 };
+        const flags = flagMap.get(f.id) || { is_master: 0, is_low: 0 };
         lines.push(`${it.folderId}\t${it.episodeKey}\t${f.filePath}\t${f.size}\t${f.quality}\t${f.source}\t${flags.is_master}\t${flags.is_low}`);
       }
     }
@@ -294,7 +293,7 @@ function main() {
   }
 
   fs.writeFileSync(outPath, lines.join('\n') + '\n', 'utf8');
-  db.close();
+  await prisma.$disconnect();
 
   console.log(`Wrote ${outPath}`);
   if (!apply) {
@@ -302,4 +301,7 @@ function main() {
   }
 }
 
-main();
+main().catch((err) => {
+  console.error('rescan-db-master-low failed', { message: err?.message, stack: err?.stack });
+  process.exitCode = 1;
+});

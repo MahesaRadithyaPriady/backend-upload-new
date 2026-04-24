@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 
 import dotenv from 'dotenv';
 
-import { db as catalogDb } from '../lib/storageCatalogDb.js';
+import { prisma } from '../lib/storageCatalogDb.js';
 import { getDriveB2MappingByB2ObjectKey, upsertDriveB2Mapping } from '../lib/fileMappingDb.js';
 import { getDrive } from '../lib/drive.js';
 
@@ -224,17 +224,16 @@ async function crawlDriveTree({ rootId, maxFiles = 0 } = {}) {
   return { rootName, items };
 }
 
-function getAllB2FilesFromCatalog({ b2Prefix = null } = {}) {
-  if (b2Prefix) {
-    const pref = normalizePath(b2Prefix);
-    const like = pref ? `${pref}/%` : '%';
-    return catalogDb
-      .prepare('SELECT file_path as filePath, folder_id as folderId FROM files WHERE file_path LIKE ? ORDER BY file_path')
-      .all(like);
-  }
-  return catalogDb
-    .prepare('SELECT file_path as filePath, folder_id as folderId FROM files ORDER BY file_path')
-    .all();
+async function getAllB2FilesFromCatalog({ b2Prefix = null } = {}) {
+  const where = b2Prefix
+    ? { filePath: { startsWith: `${normalizePath(b2Prefix)}/` } }
+    : undefined;
+  const rows = await prisma.file.findMany({
+    where,
+    select: { filePath: true, folderId: true },
+    orderBy: { filePath: 'asc' },
+  });
+  return rows;
 }
 
 function usageAndExit(code = 1) {
@@ -290,7 +289,7 @@ async function main() {
     driveItems = loadDriveList(driveListPath);
   }
 
-  const b2Rows = getAllB2FilesFromCatalog({ b2Prefix });
+  const b2Rows = await getAllB2FilesFromCatalog({ b2Prefix });
 
   const b2Paths = b2Rows.map((r) => r.filePath);
   const b2FolderIdByPath = new Map(b2Rows.map((r) => [r.filePath, r.folderId ?? null]));
@@ -399,7 +398,7 @@ async function main() {
     }
 
     if (!dryRun) {
-      const existing = getDriveB2MappingByB2ObjectKey(b2ObjectKey);
+      const existing = await getDriveB2MappingByB2ObjectKey(b2ObjectKey);
       if (existing?.driveFileId && String(existing.driveFileId) !== String(driveFileId)) {
         alreadyLinked++;
         if (alreadyLinked <= 5) {
@@ -411,7 +410,7 @@ async function main() {
         }
         continue;
       }
-      upsertDriveB2Mapping({
+      await upsertDriveB2Mapping({
         driveFileId,
         drivePath: normalizePath(drivePath),
         driveFolderId,

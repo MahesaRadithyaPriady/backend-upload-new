@@ -49,3 +49,6 @@ storage_catalog.db
 *.db-journal
 
 .env
+
+temp/
+

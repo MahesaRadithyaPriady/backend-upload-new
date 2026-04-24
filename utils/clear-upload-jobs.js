@@ -1,10 +1,9 @@
-import { db, dbPath } from '../lib/uploadJobsDb.js';
+import { prisma } from '../lib/uploadJobsDb.js';
 
 function parseArgs(argv) {
-  const out = { yes: false, vacuum: false };
+  const out = { yes: false };
   for (const a of argv) {
     if (a === '--yes' || a === '-y') out.yes = true;
-    if (a === '--vacuum') out.vacuum = true;
   }
   return out;
 }
@@ -19,29 +18,14 @@ async function main() {
     return;
   }
 
-  const before = db.prepare('SELECT COUNT(1) AS c FROM upload_jobs').get()?.c ?? 0;
-
-  const tx = db.transaction(() => {
-    db.exec('DELETE FROM upload_jobs;');
-  });
-  tx();
-
-  const after = db.prepare('SELECT COUNT(1) AS c FROM upload_jobs').get()?.c ?? 0;
-
-  if (args.vacuum) {
-    try {
-      db.exec('VACUUM;');
-    } catch {
-      // ignore
-    }
-  }
+  const before = await prisma.uploadJob.count();
+  const { count: deleted } = await prisma.uploadJob.deleteMany({});
+  const after = await prisma.uploadJob.count();
 
   console.log('upload_jobs cleared', {
-    dbPath,
-    deleted: Math.max(0, before - after),
+    deleted,
     before,
     after,
-    vacuum: Boolean(args.vacuum),
   });
 }
 
