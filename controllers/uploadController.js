@@ -9,7 +9,6 @@ import { createPresignedPutUrl } from '../lib/s3.js';
 import { upsertFolder, getFolderByPrefix, upsertFile } from '../lib/storageCatalogDb.js';
 import { setProgress, getProgress } from '../utils/uploadProgress.js';
 import { upsertJob, updateJobThrottled, getJobById, getJobByPrefix, listJobs, deleteJobById } from '../lib/uploadJobsDb.js';
-import config from '../config/config.js';
 
 const g = typeof globalThis !== 'undefined' ? globalThis : global;
 if (!g.__uploadJobCancelRegistry) {
@@ -844,6 +843,54 @@ function safeUrl(input) {
   }
 }
 
+function getCdnBase() {
+  return String(process.env.B2_CDN_BASE || `https://cdn-stable.nanimeid.xyz/file/${process.env.B2_BUCKET_NAME || 'NanimeID'}`).replace(/\/+$/, '');
+}
+
+function buildStreamUrl(objectKey) {
+  const cdnBase = getCdnBase();
+  const cleaned = String(objectKey || '').replace(/^\/+/, '');
+  if (!cleaned) return null;
+  const encoded = cleaned.split('/').map(encodeURIComponent).join('/');
+  return `${cdnBase}/${encoded}`;
+}
+
+function detectFileType(fileName) {
+  const lower = String(fileName || '').toLowerCase();
+  if (lower.endsWith('.m3u8')) return 'hls';
+  if (lower.endsWith('.mp4')) return 'mp4';
+  return null;
+}
+
+function buildResultFiles(files) {
+  if (!Array.isArray(files)) return [];
+  return files
+    .map((f) => {
+      const objectKey = f?.id || f?.path || f?.filePath || '';
+      if (!objectKey) return null;
+      const name = f?.name || path.posix.basename(objectKey) || '';
+      const type = f?.type || detectFileType(name) || 'mp4';
+      return {
+        path: objectKey,
+        name,
+        type,
+        streamUrl: buildStreamUrl(objectKey),
+      };
+    })
+    .filter(Boolean);
+}
+
+function enrichFileWithTypeAndUrl(file) {
+  if (!file) return file;
+  const objectKey = file?.id || file?.path || file?.filePath || '';
+  const name = file?.name || '';
+  return {
+    ...file,
+    type: file?.type || detectFileType(name) || 'mp4',
+    streamUrl: file?.streamUrl || (objectKey ? buildStreamUrl(objectKey) : null),
+  };
+}
+
 export async function importB2ByUrlController(request, reply) {
   let jobId = null;
   let unregisterAbort = null;
@@ -1030,15 +1077,16 @@ export async function importB2ByUrlController(request, reply) {
       files.push({ id: objectKey, name: baseName, mimeType: ct, size, modifiedTime: uploadedAt || null });
     }
 
+    const resultFiles = buildResultFiles(files);
     if (isCancelled(jobId)) {
-      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100, resultFiles });
     } else {
-      await updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100, resultFiles });
     }
 
     return reply
       .headers({ 'Cache-Control': 'no-store, no-cache, must-revalidate', Pragma: 'no-cache' })
-      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files: files.map(enrichFileWithTypeAndUrl), resultFiles });
   } catch (err) {
     request.log.error({ message: err?.message, stack: err?.stack }, 'Import by URL error');
     if (jobId) {
@@ -1261,15 +1309,16 @@ export async function directUploadPutController(request, reply) {
       files.push({ id: objectKey, name: baseName, mimeType: ct, size, modifiedTime: uploadedAt || null });
     }
 
+    const resultFiles = buildResultFiles(files);
     if (isCancelled(jobId)) {
-      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length, percent: 100, resultFiles });
     } else {
-      await updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'done', done: files.length, total: files.length, percent: 100, resultFiles });
     }
 
     return reply
       .headers({ 'Cache-Control': 'no-store, no-cache, must-revalidate', Pragma: 'no-cache' })
-      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files: files.map(enrichFileWithTypeAndUrl), resultFiles });
   } catch (err) {
     request.log.error({ message: err?.message, stack: err?.stack }, 'Direct upload error');
     if (jobId) {
@@ -1393,11 +1442,12 @@ export async function commitB2UploadController(request, reply) {
       });
     }
 
+    const resultFiles = buildResultFiles(files);
     if (jobId) {
       if (isCancelled(jobId)) {
-        await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
+        await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100, resultFiles });
       } else {
-        await updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100 });
+        await updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100, resultFiles });
       }
     }
 
@@ -1412,7 +1462,7 @@ export async function commitB2UploadController(request, reply) {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ jobId: jobId || undefined, files, errors: errors.length ? errors : undefined });
+      .send({ jobId: jobId || undefined, files: files.map(enrichFileWithTypeAndUrl), resultFiles, errors: errors.length ? errors : undefined });
   } catch (err) {
     request.log.error(
       {
@@ -2035,13 +2085,13 @@ export async function uploadB2AndCatalogController(request, reply) {
           uploadedAt,
         });
 
-        files.push({
+        files.push(enrichFileWithTypeAndUrl({
           id: objectKey,
           name: baseName,
           mimeType: contentType,
           size,
           modifiedTime: uploadedAt || null,
-        });
+        }));
       } catch (e) {
         const status = e?.status || e?.response?.status || e?.response?.data?.status;
         const code = e?.code || e?.response?.data?.code;
@@ -2076,6 +2126,7 @@ export async function uploadB2AndCatalogController(request, reply) {
       return reply.code(400).send({ error: 'No files uploaded' });
     }
 
+    const resultFiles = buildResultFiles(files);
     const statusCode = errors.length ? 207 : 200;
     return reply
       .code(statusCode)
@@ -2083,7 +2134,7 @@ export async function uploadB2AndCatalogController(request, reply) {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ files, errors: errors.length ? errors : undefined });
+      .send({ files, resultFiles, errors: errors.length ? errors : undefined });
   } catch (err) {
     request.log.error(
       {
@@ -2154,13 +2205,13 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
         const folderId = await ensureFolderHierarchy(hlsPrefix);
         await uploadHlsOutputsToB2({ request, dirPath: hlsOutDir, hlsPrefix, folderId, jobId, objectKey });
 
-        return {
+        return enrichFileWithTypeAndUrl({
           id: `${hlsPrefix}index.m3u8`,
           name: 'index.m3u8',
           mimeType: 'application/vnd.apple.mpegurl',
           size: 0,
           modifiedTime: new Date().toISOString(),
-        };
+        });
       } finally {
         unregisterTmpCleanup();
         removeDirSafe(tmpDir);
@@ -2201,13 +2252,13 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
       uploadedAt,
     });
 
-    return {
+    return enrichFileWithTypeAndUrl({
       id: objectKey,
       name: baseName,
       mimeType: contentType,
       size,
       modifiedTime: uploadedAt || null,
-    };
+    });
   } finally {
     try {
       fs.rmSync(tempInputPath, { force: true });
@@ -2510,10 +2561,11 @@ export async function uploadB2FolderMultipartController(request, reply) {
     removeDirSafe(stagedRootDir);
     stagedRootDir = null;
 
+    const resultFiles = buildResultFiles(files);
     if (isCancelled(jobId)) {
-      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: 'cancelled', error: 'Cancelled', done: files.length, total: files.length + errors.length, percent: 100, resultFiles });
     } else {
-      await updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100 });
+      await updateJobThrottled(jobId, { status: errors.length ? 'partial' : 'done', done: files.length, total: files.length + errors.length, percent: 100, resultFiles });
     }
 
     const statusCode = errors.length ? 207 : 200;
@@ -2523,7 +2575,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
-      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files, errors: errors.length ? errors : undefined });
+      .send({ jobId, ssePath: buildUploadJobSsePath(jobId), files, resultFiles, errors: errors.length ? errors : undefined });
   } catch (err) {
     request.log.error(
       {

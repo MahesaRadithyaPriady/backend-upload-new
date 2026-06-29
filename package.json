@@ -5,6 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "start": "node index.js",
     "dev": "nodemon index.js",
     "migrate:drive:b2": "node utils/migrate-drive-to-b2.js",
     "migrate:popular:encode": "node utils/migrate-popular-encode.js",

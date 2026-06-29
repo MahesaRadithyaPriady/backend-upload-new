@@ -1,12 +1,11 @@
-import config from '../config/config.js';
 import { getB2 } from '../lib/b2.js';
 
 async function main() {
   const result = {
     ok: false,
-    bucketName: config.B2_BUCKET_NAME || null,
-    hasKeyId: Boolean(config.B2_APPLICATION_KEY_ID),
-    hasKey: Boolean(config.B2_APPLICATION_KEY),
+    bucketName: process.env.B2_BUCKET_NAME || null,
+    hasKeyId: Boolean(process.env.B2_APPLICATION_KEY_ID),
+    hasKey: Boolean(process.env.B2_APPLICATION_KEY),
     steps: [],
   };
 

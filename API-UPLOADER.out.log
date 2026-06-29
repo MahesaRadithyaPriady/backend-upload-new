@@ -1,0 +1,76 @@
+[dotenv@17.2.3] injecting env (41) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[DEBUG] ADMIN_API_BASE from env: https://mainappsv1.nanimeid.xyz/2.1.0
+{"level":30,"time":1782717252940,"pid":5216,"hostname":"DESKTOP-VUP2H3P","msg":"Server listening at http://127.0.0.1:4000"}
+[popularEncode] Job not started (ENABLE_POPULAR_ENCODE_JOB !== true)
+{"level":30,"time":1782717252940,"pid":5216,"hostname":"DESKTOP-VUP2H3P","msg":"Server listening at http://192.168.1.2:4000"}
+{"level":30,"time":1782717252940,"pid":5216,"hostname":"DESKTOP-VUP2H3P","msg":"Server listening at http://192.168.176.1:4000"}
+{"level":30,"time":1782717252940,"pid":5216,"hostname":"DESKTOP-VUP2H3P","msg":"Server listening at http://172.29.80.1:4000"}
+{"level":30,"time":1782717252941,"pid":5216,"hostname":"DESKTOP-VUP2H3P","msg":"Server listening on http://0.0.0.0:4000"}
+{"level":30,"time":1782717252994,"pid":5216,"hostname":"DESKTOP-VUP2H3P","msg":"Cleared persisted upload jobs on startup"}
+{"level":30,"time":1782717254446,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-1","req":{"method":"GET","url":"/","host":"45.198.151.161:4000","remoteAddress":"45.198.151.161","remotePort":50719},"msg":"incoming request"}
+{"level":30,"time":1782717254447,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-1","msg":"Route GET:/ not found"}
+{"level":30,"time":1782717254451,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-1","res":{"statusCode":404},"responseTime":4.665000006556511,"msg":"request completed"}
+{"level":30,"time":1782717996880,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-2","req":{"method":"GET","url":"/","host":"45.198.151.161:4000","remoteAddress":"45.198.151.161","remotePort":55845},"msg":"incoming request"}
+{"level":30,"time":1782717996880,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-2","msg":"Route GET:/ not found"}
+{"level":30,"time":1782717996881,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-2","res":{"statusCode":404},"responseTime":0.8108000010251999,"msg":"request completed"}
+{"level":30,"time":1782717997254,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-3","req":{"method":"GET","url":"/","host":"45.198.151.161:4000","remoteAddress":"45.198.151.161","remotePort":55845},"msg":"incoming request"}
+{"level":30,"time":1782717997255,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-3","msg":"Route GET:/ not found"}
+{"level":30,"time":1782717997255,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-3","res":{"statusCode":404},"responseTime":0.4068000018596649,"msg":"request completed"}
+{"level":30,"time":1782718241973,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-4","req":{"method":"GET","url":"/","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":57304},"msg":"incoming request"}
+{"level":30,"time":1782718241973,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-4","msg":"Route GET:/ not found"}
+{"level":30,"time":1782718241974,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-4","res":{"statusCode":404},"responseTime":1.2261999994516373,"msg":"request completed"}
+{"level":30,"time":1782718242019,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-5","req":{"method":"GET","url":"/favicon.ico","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":57304},"msg":"incoming request"}
+{"level":30,"time":1782718242020,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-5","msg":"Route GET:/favicon.ico not found"}
+{"level":30,"time":1782718242021,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-5","res":{"statusCode":404},"responseTime":0.7686000019311905,"msg":"request completed"}
+{"level":30,"time":1782718248327,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-6","req":{"method":"GET","url":"/","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":57304},"msg":"incoming request"}
+{"level":30,"time":1782718248327,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-6","msg":"Route GET:/ not found"}
+{"level":30,"time":1782718248327,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-6","res":{"statusCode":404},"responseTime":0.6366000026464462,"msg":"request completed"}
+{"level":30,"time":1782718319113,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-7","req":{"method":"GET","url":"/","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":57304},"msg":"incoming request"}
+{"level":30,"time":1782718319114,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-7","msg":"Route GET:/ not found"}
+{"level":30,"time":1782718319114,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-7","res":{"statusCode":404},"responseTime":0.6552999913692474,"msg":"request completed"}
+{"level":30,"time":1782718426294,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-8","req":{"method":"HEAD","url":"/","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":58701},"msg":"incoming request"}
+{"level":30,"time":1782718426294,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-8","msg":"Route HEAD:/ not found"}
+{"level":30,"time":1782718426295,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-8","res":{"statusCode":404},"responseTime":0.3660999983549118,"msg":"request completed"}
+{"level":30,"time":1782718449257,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-9","req":{"method":"HEAD","url":"/","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":58701},"msg":"incoming request"}
+{"level":30,"time":1782718449257,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-9","msg":"Route HEAD:/ not found"}
+{"level":30,"time":1782718449258,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-9","res":{"statusCode":404},"responseTime":0.703000009059906,"msg":"request completed"}
+{"level":30,"time":1782718551199,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-a","req":{"method":"GET","url":"/b2/folders/pageSize=50","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":54599},"msg":"incoming request"}
+{"level":30,"time":1782718551199,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-a","msg":"Route GET:/b2/folders/pageSize=50 not found"}
+{"level":30,"time":1782718551200,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-a","res":{"statusCode":404},"responseTime":0.4998999983072281,"msg":"request completed"}
+{"level":30,"time":1782718554023,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-b","req":{"method":"GET","url":"/b2/folders/pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":54599},"msg":"incoming request"}
+{"level":30,"time":1782718554023,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-b","msg":"Route GET:/b2/folders/pageSize=50 not found"}
+{"level":30,"time":1782718554024,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-b","res":{"statusCode":404},"responseTime":0.45250000059604645,"msg":"request completed"}
+{"level":30,"time":1782718642216,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-c","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"127.0.0.1:4000","remoteAddress":"127.0.0.1","remotePort":50264},"msg":"incoming request"}
+{"level":30,"time":1782718642328,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-c","res":{"statusCode":200},"responseTime":111.31530000269413,"msg":"request completed"}
+{"level":30,"time":1782718646777,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-d","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"127.0.0.1","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718646780,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-d","res":{"statusCode":200},"responseTime":2.3952999860048294,"msg":"request completed"}
+{"level":30,"time":1782718652954,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-e","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718652957,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-e","res":{"statusCode":200},"responseTime":2.564500004053116,"msg":"request completed"}
+{"level":30,"time":1782718683189,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-f","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718683230,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-f","res":{"statusCode":200},"responseTime":40.84010000526905,"msg":"request completed"}
+{"level":30,"time":1782718731865,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-g","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718731910,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-g","res":{"statusCode":200},"responseTime":44.81699998676777,"msg":"request completed"}
+{"level":30,"time":1782718731962,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-h","req":{"method":"GET","url":"/favicon.ico","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718731962,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-h","msg":"Route GET:/favicon.ico not found"}
+{"level":30,"time":1782718731962,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-h","res":{"statusCode":404},"responseTime":0.4259999990463257,"msg":"request completed"}
+{"level":30,"time":1782718737781,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-i","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718737784,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-i","res":{"statusCode":200},"responseTime":2.5800999999046326,"msg":"request completed"}
+{"level":30,"time":1782718738213,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-j","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53266},"msg":"incoming request"}
+{"level":30,"time":1782718738215,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-j","res":{"statusCode":200},"responseTime":2.438399985432625,"msg":"request completed"}
+{"level":30,"time":1782718832574,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-k","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53313},"msg":"incoming request"}
+{"level":30,"time":1782718832619,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-k","res":{"statusCode":200},"responseTime":44.64910000562668,"msg":"request completed"}
+{"level":30,"time":1782718832994,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-l","req":{"method":"GET","url":"/b2/folders?pageSize=50","host":"api-upload.nanimeid.xyz","remoteAddress":"127.0.0.1","remotePort":53313},"msg":"incoming request"}
+{"level":30,"time":1782718832998,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-l","res":{"statusCode":200},"responseTime":3.417599990963936,"msg":"request completed"}
+{"level":30,"time":1782719189912,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-m","req":{"method":"GET","url":"/SDK/webLanguage","host":"45.198.151.161:80","remoteAddress":"127.0.0.1","remotePort":49178},"msg":"incoming request"}
+{"level":30,"time":1782719189912,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-m","msg":"Route GET:/SDK/webLanguage not found"}
+{"level":30,"time":1782719189912,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-m","res":{"statusCode":404},"responseTime":0.41430000960826874,"msg":"request completed"}
+{"level":30,"time":1782719215584,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-n","req":{"method":"GET","url":"/","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":63398},"msg":"incoming request"}
+{"level":30,"time":1782719215585,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-n","msg":"Route GET:/ not found"}
+{"level":30,"time":1782719215585,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-n","res":{"statusCode":404},"responseTime":0.536999985575676,"msg":"request completed"}
+{"level":30,"time":1782719225040,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-o","req":{"method":"GET","url":"/","host":"45.198.151.161:80","remoteAddress":"127.0.0.1","remotePort":63398},"msg":"incoming request"}
+{"level":30,"time":1782719225040,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-o","msg":"Route GET:/ not found"}
+{"level":30,"time":1782719225040,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-o","res":{"statusCode":404},"responseTime":0.3747999966144562,"msg":"request completed"}
+{"level":30,"time":1782719298300,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-p","req":{"method":"GET","url":"/","host":"45.198.151.161","remoteAddress":"127.0.0.1","remotePort":50241},"msg":"incoming request"}
+{"level":30,"time":1782719298300,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-p","msg":"Route GET:/ not found"}
+{"level":30,"time":1782719298300,"pid":5216,"hostname":"DESKTOP-VUP2H3P","reqId":"req-p","res":{"statusCode":404},"responseTime":0.3254999965429306,"msg":"request completed"}

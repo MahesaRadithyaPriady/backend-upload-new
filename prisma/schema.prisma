@@ -99,6 +99,7 @@ model UploadJob {
   total       Int?     @default(0)
   percent     Int?     @default(0)
   error       String?
+  resultFiles Json?    @map("result_files")
   createdAtMs BigInt?  @map("created_at_ms")
   updatedAtMs BigInt?  @map("updated_at_ms")
 

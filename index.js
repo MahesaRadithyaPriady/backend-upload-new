@@ -1,10 +1,14 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
+console.log('[DEBUG] ADMIN_API_BASE from env:', process.env.ADMIN_API_BASE);
+
 import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
-import dotenv from 'dotenv';
 
-import config from './config/config.js';
+
 import { clearAllJobs } from './lib/uploadJobsDb.js';
 
 import { registerAuthRoutes } from './routes/auth.js';
@@ -14,8 +18,6 @@ import {registerDriveRoutes} from './routes/drive.js'
 import { registerEncodeRoutes } from './routes/encode.js';
 import { registerAnimeEncodeRoutes } from './routes/animeEncode.js';
 import { startPopularEncodeJob } from './lib/popularEncodeJob.js';
-
-dotenv.config();
 
 const corsOrigins = String(process.env.CORS_ORIGIN || '')
   .split(',')
@@ -39,7 +41,7 @@ fastify.addContentTypeParser(/^video\//, (req, payload, done) => {
 });
   
 fastify.register(fastifyCors, {
-  origin: allowedCorsOrigins,
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 });

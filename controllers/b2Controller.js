@@ -1,6 +1,5 @@
 import path from 'path';
 import { listFiles, getSignedDownloadUrl, deleteFile, deleteFileByName, copyFileWithinBucket } from '../lib/b2.js';
-import config from '../config/config.js';
 import {
   listFoldersByParent,
   listFilesByFolder,
@@ -40,7 +39,7 @@ const signedUrlCache = new Map();
 const proxySignedUrlCache = new Map();
 
 function debugSignedUrlLog(request, payload, msg) {
-  if (!config.DEBUG_SIGNED_URL) return;
+  if (process.env.DEBUG_SIGNED_URL !== 'true') return;
   try {
     request?.log?.info(payload, msg);
   } catch {
@@ -96,7 +95,7 @@ export async function getB2StreamUrlController(request, reply) {
     return reply.code(400).send({ error: 'Missing file id' });
   }
 
-  const allowShortFinal = process.env.ALLOW_SHORT_TTL === 'true' || config.NODE_ENV !== 'production';
+  const allowShortFinal = process.env.ALLOW_SHORT_TTL === 'true' || process.env.NODE_ENV !== 'production';
   const minSeconds = allowShortFinal ? 10 : 300;
   const minMinutes = allowShortFinal ? 1 : 5;
 

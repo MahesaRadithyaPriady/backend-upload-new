@@ -1,0 +1,10 @@
+2026-06-29T14:13:49.697 INFO  console - Installing service 'API-UPLOADER (API-UPLOADER)'...
+2026-06-29T14:13:49.764 INFO  console - Service 'API-UPLOADER (API-UPLOADER)' was installed successfully.
+2026-06-29T14:14:11.176 INFO  console - Service 'API-UPLOADER (API-UPLOADER)' was refreshed successfully.
+2026-06-29T14:14:11.202 INFO  console - Starting service 'API-UPLOADER (API-UPLOADER)'...
+2026-06-29T14:14:11.549 DEBUG console - Starting WinSW in service mode.
+2026-06-29T14:14:11.593 INFO  console - Service 'API-UPLOADER (API-UPLOADER)' was refreshed successfully.
+2026-06-29T14:14:11.611 INFO  service - Starting C:\Program Files\nodejs\node.exe
+2026-06-29T14:14:11.643 INFO  service - Started process node (5216).
+2026-06-29T14:14:11.672 INFO  service - Service started successfully.
+2026-06-29T14:14:11.868 INFO  console - Service 'API-UPLOADER (API-UPLOADER)' started successfully.
