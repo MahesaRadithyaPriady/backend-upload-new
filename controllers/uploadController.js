@@ -153,6 +153,14 @@ function normalizeRequestedJobId(value) {
   return cleaned;
 }
 
+const PROJECT_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')));
+
+function getTempRoot() {
+  const env = process.env.ENCODE_TEMP_DIR;
+  if (env) return path.isAbsolute(env) ? env : path.resolve(PROJECT_ROOT, env);
+  return path.join(os.tmpdir());
+}
+
 function resolveRequestedJobId(...values) {
   for (const value of values) {
     const normalized = normalizeRequestedJobId(value);
@@ -998,7 +1006,7 @@ export async function importB2ByUrlController(request, reply) {
     if (encode) {
       await updateJobThrottled(jobId, { status: 'buffering', current: objectKey, percent: 0 });
 
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+      const tmpDir = fs.mkdtempSync(path.join(getTempRoot(), 'hls-'));
       const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
         removeDirSafe(tmpDir);
       });
@@ -1231,7 +1239,7 @@ export async function directUploadPutController(request, reply) {
 
   try {
     if (entry.encode) {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+      const tmpDir = fs.mkdtempSync(path.join(getTempRoot(), 'hls-'));
       const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
         removeDirSafe(tmpDir);
       });
@@ -1863,7 +1871,7 @@ export async function uploadDriveController(request, reply) {
     (async () => {
       const created = [];
       // tmpDir dideklarasikan di sini agar bisa dibersihkan di blok finally
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'upload-'));
+      const tmpDir = fs.mkdtempSync(path.join(getTempRoot(), 'upload-'));
       try {
         const inputExt = path.extname(fileName || '') || '.dat';
         const inputPath = path.join(tmpDir, `input${inputExt}`);
@@ -2198,7 +2206,7 @@ async function processBufferedFolderUploadEntry({ entry, request, jobId }) {
     }
 
     if (wantEncode) {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hls-'));
+      const tmpDir = fs.mkdtempSync(path.join(getTempRoot(), 'hls-'));
       const unregisterTmpCleanup = registerJobCleanup(jobId, () => {
         removeDirSafe(tmpDir);
       });
@@ -2344,7 +2352,7 @@ export async function uploadB2FolderMultipartController(request, reply) {
     jobId = resolveRequestedJobId(request.query?.jobId, request.query?.job_id, request.headers?.['x-upload-job-id']);
     await upsertJob({ id: jobId, prefix: null, status: 'receiving', current: null, done: 0, total: 0, percent: 0 });
     getCancelState(jobId);
-    stagedRootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'folder-upload-'));
+    stagedRootDir = fs.mkdtempSync(path.join(getTempRoot(), 'folder-upload-'));
     unregisterStageCleanup = registerJobCleanup(jobId, () => {
       removeDirSafe(stagedRootDir);
     });
