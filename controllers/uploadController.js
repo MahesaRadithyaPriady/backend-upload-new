@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { PassThrough, Readable } from 'stream';
 import pLimit from 'p-limit';
@@ -153,12 +154,17 @@ function normalizeRequestedJobId(value) {
   return cleaned;
 }
 
-const PROJECT_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')));
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function getTempRoot() {
   const env = process.env.ENCODE_TEMP_DIR;
-  if (env) return path.isAbsolute(env) ? env : path.resolve(PROJECT_ROOT, env);
-  return path.join(os.tmpdir());
+  const dir = env
+    ? (path.isAbsolute(env) ? env : path.resolve(PROJECT_ROOT, env))
+    : os.tmpdir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {}
+  return dir;
 }
 
 function resolveRequestedJobId(...values) {
