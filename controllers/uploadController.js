@@ -1498,6 +1498,7 @@ export async function getB2S3PresignPutController(request, reply) {
     }
 
     const { filePath, fileName, prefix, contentType } = input || {};
+    const jobId = input?.jobId || input?.job_id || null;
 
     const norm = normalizeFilePathAndName({ filePath, fileName, prefix });
     const objectKey = norm.objectKey;
@@ -1509,6 +1510,18 @@ export async function getB2S3PresignPutController(request, reply) {
     const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
     if (!bucket) {
       return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
+    }
+
+    if (jobId) {
+      await upsertJob({
+        id: jobId,
+        prefix: norm.folderPrefix || null,
+        status: 'waiting_upload',
+        current: objectKey,
+        done: 0,
+        total: 1,
+        percent: 0,
+      });
     }
 
     const expiresInSeconds = (() => {
@@ -1525,12 +1538,18 @@ export async function getB2S3PresignPutController(request, reply) {
       expiresInSeconds,
     });
 
+    if (jobId) {
+      await updateJobThrottled(jobId, { status: 'uploading', current: objectKey, percent: 5 });
+    }
+
     return reply
       .headers({
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         Pragma: 'no-cache',
       })
       .send({
+        jobId: jobId || undefined,
+        ssePath: jobId ? buildUploadJobSsePath(jobId) : undefined,
         filePath: objectKey,
         bucket,
         method: signed.method,
@@ -1553,6 +1572,7 @@ export async function getB2S3PresignPutBatchController(request, reply) {
   try {
     const body = request.body || {};
     const inputFiles = Array.isArray(body.files) ? body.files : [];
+    const jobId = body.jobId || body.job_id || null;
 
     if (parseEncodeFlag(body?.encode)) {
       return reply.code(400).send({
@@ -1568,6 +1588,16 @@ export async function getB2S3PresignPutBatchController(request, reply) {
     const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
     if (!bucket) {
       return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
+    }
+
+    if (jobId) {
+      await upsertJob({
+        id: jobId,
+        status: 'waiting_upload',
+        done: 0,
+        total: inputFiles.length,
+        percent: 0,
+      });
     }
 
     const files = [];
