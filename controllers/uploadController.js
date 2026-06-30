@@ -1506,7 +1506,7 @@ export async function getB2S3PresignPutController(request, reply) {
       return reply.code(400).send({ error: 'Missing filePath or (prefix + fileName)' });
     }
 
-    const bucket = process.env.B2_S3_BUCKET_NAME || config.B2_BUCKET_NAME;
+    const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
     if (!bucket) {
       return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
     }
@@ -1565,7 +1565,7 @@ export async function getB2S3PresignPutBatchController(request, reply) {
       return reply.code(400).send({ error: 'Missing files array' });
     }
 
-    const bucket = process.env.B2_S3_BUCKET_NAME || config.B2_BUCKET_NAME;
+    const bucket = process.env.B2_S3_BUCKET_NAME || process.env.B2_BUCKET_NAME;
     if (!bucket) {
       return reply.code(500).send({ error: 'Missing B2_S3_BUCKET_NAME (or B2_BUCKET_NAME) env var' });
     }
