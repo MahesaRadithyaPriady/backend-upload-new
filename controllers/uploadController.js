@@ -858,7 +858,11 @@ function safeUrl(input) {
 }
 
 function getCdnBase() {
-  return String(process.env.B2_CDN_BASE || `https://cdn-stable.nanimeid.xyz/file/${process.env.B2_BUCKET_NAME || 'NanimeID'}`).replace(/\/+$/, '');
+  const cdnBase = process.env.B2_CDN_BASE;
+  if (cdnBase) return String(cdnBase).replace(/\/+$/, '');
+  const bucketName = process.env.B2_BUCKET_NAME;
+  if (!bucketName) throw new Error('B2_CDN_BASE or B2_BUCKET_NAME env var is required');
+  return `https://cdn-stable.nanimeid.xyz/file/${bucketName}`.replace(/\/+$/, '');
 }
 
 function buildStreamUrl(objectKey) {
@@ -901,7 +905,16 @@ function enrichFileWithTypeAndUrl(file) {
   return {
     ...file,
     type: file?.type || detectFileType(name) || 'mp4',
-    streamUrl: file?.streamUrl || (objectKey ? buildStreamUrl(objectKey) : null),
+    streamUrl: objectKey ? buildStreamUrl(objectKey) : null,
+  };
+}
+
+function remapJobStreamUrls(job) {
+  if (!job) return job;
+  return {
+    ...job,
+    files: Array.isArray(job.files) ? job.files.map(enrichFileWithTypeAndUrl) : job.files,
+    resultFiles: Array.isArray(job.resultFiles) ? job.resultFiles.map(enrichFileWithTypeAndUrl) : job.resultFiles,
   };
 }
 
@@ -2686,8 +2699,9 @@ export async function deleteUploadJobController(request, reply) {
 export async function getUploadJobController(request, reply) {
   const id = request.params?.id || request.query?.id;
   if (!id) return reply.code(400).send({ error: 'Missing id' });
-  const job = await getJobById(id);
-  if (!job) return reply.code(404).send({ error: 'Job not found' });
+  const rawJob = await getJobById(id);
+  if (!rawJob) return reply.code(404).send({ error: 'Job not found' });
+  const job = remapJobStreamUrls(rawJob);
   return reply.headers({ 'Cache-Control': 'no-store' }).send(job);
 }
 
@@ -2695,8 +2709,9 @@ export async function getUploadJobByPrefixController(request, reply) {
   const prefix = request.query?.prefix;
   if (!prefix) return reply.code(400).send({ error: 'Missing prefix' });
   const cleaned = cleanRelativePath(prefix);
-  const job = await getJobByPrefix(cleaned);
-  if (!job) return reply.code(404).send({ error: 'Job not found' });
+  const rawJob = await getJobByPrefix(cleaned);
+  if (!rawJob) return reply.code(404).send({ error: 'Job not found' });
+  const job = remapJobStreamUrls(rawJob);
   return reply.headers({ 'Cache-Control': 'no-store' }).send(job);
 }
 
@@ -2705,7 +2720,7 @@ export async function listUploadJobsController(request, reply) {
   const limit = request.query?.limit;
   const activeOnly = active === '1' || active === 'true' || active === 'yes';
   const jobs = await listJobs({ activeOnly, limit });
-  return reply.headers({ 'Cache-Control': 'no-store' }).send({ jobs });
+  return reply.headers({ 'Cache-Control': 'no-store' }).send({ jobs: jobs.map(remapJobStreamUrls) });
 }
 
 export async function streamUploadJobSseController(request, reply) {
@@ -2752,7 +2767,7 @@ export async function streamUploadJobSseController(request, reply) {
   const firstJob = await getJob();
   if (firstJob) {
     lastUpdatedAt = firstJob.updated_at_ms ?? null;
-    writeEvent('update', firstJob);
+    writeEvent('update', remapJobStreamUrls(firstJob));
   } else {
     writeEvent('not_found', { error: 'Job not found yet' });
   }
@@ -2773,7 +2788,7 @@ export async function streamUploadJobSseController(request, reply) {
       const updated = job.updated_at_ms ?? null;
       if (updated == null || updated === lastUpdatedAt) return;
       lastUpdatedAt = updated;
-      writeEvent('update', job);
+      writeEvent('update', remapJobStreamUrls(job));
       if (job.status === 'done' || job.status === 'error' || job.status === 'partial') {
         writeEvent('end', { status: job.status });
         try {

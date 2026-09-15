@@ -35,6 +35,22 @@ function inferContentTypeFromPath(p) {
   return map[ext] || null;
 }
 
+function getCdnBase() {
+  const cdnBase = process.env.B2_CDN_BASE;
+  if (cdnBase) return String(cdnBase).replace(/\/+$/, '');
+  const bucketName = process.env.B2_BUCKET_NAME;
+  if (!bucketName) throw new Error('B2_CDN_BASE or B2_BUCKET_NAME env var is required');
+  return `https://cdn-stable.nanimeid.xyz/file/${bucketName}`.replace(/\/+$/, '');
+}
+
+function buildStreamUrl(objectKey) {
+  const cdnBase = getCdnBase();
+  const cleaned = String(objectKey || '').replace(/^\/+/, '');
+  if (!cleaned) return null;
+  const encoded = cleaned.split('/').map(encodeURIComponent).join('/');
+  return `${cdnBase}/${encoded}`;
+}
+
 const signedUrlCache = new Map();
 const proxySignedUrlCache = new Map();
 
@@ -235,6 +251,7 @@ export async function listB2Controller(request, reply) {
           mimeType: f.contentType || 'application/octet-stream',
           size: Number(f.size) || 0,
           modifiedTime: f.uploadedAt ? new Date(f.uploadedAt).toISOString() : null,
+          streamUrl: buildStreamUrl(f.filePath),
         });
       }
     }
@@ -439,6 +456,7 @@ export async function listB2VideosController(request, reply) {
         mimeType: f.contentType || 'application/octet-stream',
         size: Number(f.contentLength) || 0,
         modifiedTime: f.uploadTimestamp ? new Date(f.uploadTimestamp).toISOString() : null,
+        streamUrl: buildStreamUrl(fullName),
       });
     }
 

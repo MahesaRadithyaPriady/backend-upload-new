@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ override: true });
 
 console.log('[DEBUG] ADMIN_API_BASE from env:', process.env.ADMIN_API_BASE);
 
